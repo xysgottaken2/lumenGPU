@@ -15,6 +15,8 @@ jobs:
       - name: Test and build bridge
         shell: pwsh
         run: |
+          go mod tidy
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test ./...
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -trimpath -ldflags '-s -w' -o LumenBridge.exe .
@@ -24,6 +26,6 @@ jobs:
         run: ./Build-Windows.ps1
       - uses: actions/upload-artifact@v4
         with:
-          name: LumenGPU-0.2.3-Windows-x64
+          name: LumenGPU-0.3-Windows-x64
           path: dist/
           if-no-files-found: error

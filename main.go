@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"sync"
+ "strconv"
+ "github.com/gorilla/websocket"
  "slices"
 	"time"
 )
@@ -33,6 +35,8 @@ type Part struct {
 	Metal float64 `json:"metal"`
 	Rough float64 `json:"rough"`
 	Emit  float64 `json:"emit"`
+ Transmission float64 `json:"transmission"`
+ IOR float64 `json:"ior"`
 }
 type Update struct {
 	Camera Camera  `json:"camera"`
@@ -55,6 +59,9 @@ type Control struct {
  DX float64 `json:"dx"`
  DY float64 `json:"dy"`
  Jump bool `json:"jump"`
+ Distance float64 `json:"distance"`
+ Sensitivity float64 `json:"sensitivity"`
+ Fov float64 `json:"fov"`
 }
 type Bridge struct {
 	mu sync.RWMutex
@@ -76,11 +83,11 @@ func valid(u Update) bool {
 	}
 	for _, group:=range []*[]Part{u.Parts,u.Avatar} {
  if group==nil {continue}
-		if len(*group) > 1024 || (group==u.Avatar && len(*group)>64) {
+		if len(*group) > 16384 || (group==u.Avatar && len(*group)>64) {
 			return false
 		}
 		for _, p := range *group {
-			if !vec(p.P) || !axis(p.R) || !axis(p.U) || !axis(p.B) || !vec(p.S) || !vec(p.C) || !finite(p.Metal) || !finite(p.Rough) || !finite(p.Emit) {
+			if !vec(p.P) || !axis(p.R) || !axis(p.U) || !axis(p.B) || !vec(p.S) || !vec(p.C) || !finite(p.Metal) || !finite(p.Rough) || !finite(p.Emit) || !finite(p.Transmission) || !finite(p.IOR) {
 				return false
 			}
 			for i := 0; i < 3; i++ {
@@ -88,18 +95,36 @@ func valid(u Update) bool {
 					return false
 				}
 			}
-			if p.Metal < 0 || p.Metal > 1 || p.Rough < 0 || p.Rough > 1 || p.Emit < 0 || p.Emit > 50 {
+			if p.Metal < 0 || p.Metal > 1 || p.Rough < 0 || p.Rough > 1 || p.Emit < 0 || p.Emit > 50 || p.Transmission<0 || p.Transmission>1 || (p.IOR!=0 && (p.IOR<1 || p.IOR>2.5)) {
 				return false
 			}
 		}
 	}
 	return true
 }
+func (b *Bridge) apply(u Update,wantsControls bool) Control {
+		b.mu.Lock()
+		b.state.Camera = u.Camera
+		b.state.Sun = u.Sun
+  changed:=false
+  if u.Parts!=nil && !slices.Equal(b.worldParts,*u.Parts) {b.worldParts=*u.Parts;changed=true}
+  if u.Avatar!=nil && !slices.Equal(b.avatarParts,*u.Avatar) {b.avatarParts=*u.Avatar;changed=true}
+  if changed { // Allocate a new slice; concurrent readers retain an immutable snapshot.
+   limit:=16384-len(b.avatarParts);if len(b.worldParts)<limit {limit=len(b.worldParts)}
+   combined:=make([]Part,0,limit+len(b.avatarParts));combined=append(combined,b.worldParts[:limit]...);combined=append(combined,b.avatarParts...);b.state.Parts=combined;b.state.Scene++
+  }
+		b.state.Seq++
+		b.state.Received = time.Now().UnixMilli()
+  c:=Control{}
+  if wantsControls && time.Since(b.controlAt)<500*time.Millisecond {c=b.control;b.control.DX=0;b.control.DY=0;b.control.Jump=false}
+ b.mu.Unlock();return c
+}
 func (b *Bridge) handler() http.Handler {
 	mux := http.NewServeMux()
+ mux.HandleFunc("/api/ws",b.stream)
  mux.HandleFunc("/api/input", func(w http.ResponseWriter,r *http.Request){
   if r.Method!="POST" || r.Header.Get("Origin")!="" {http.Error(w,"native POST only",403);return}
-  var c Control; d:=json.NewDecoder(http.MaxBytesReader(w,r.Body,4096)); if d.Decode(&c)!=nil || d.Decode(new(any))!=io.EOF || !finite(c.X)||!finite(c.Z)||!finite(c.DX)||!finite(c.DY)||math.Abs(c.X)>1||math.Abs(c.Z)>1||math.Abs(c.DX)>2000||math.Abs(c.DY)>2000 {http.Error(w,"invalid input",400);return}
+  var c Control; d:=json.NewDecoder(http.MaxBytesReader(w,r.Body,4096)); if d.Decode(&c)!=nil || d.Decode(new(any))!=io.EOF || !finite(c.X)||!finite(c.Z)||!finite(c.DX)||!finite(c.DY)||math.Abs(c.X)>1||math.Abs(c.Z)>1||math.Abs(c.DX)>2000||math.Abs(c.DY)>2000 || !finite(c.Distance)||!finite(c.Sensitivity)||!finite(c.Fov)||c.Distance<0||c.Distance>40||c.Sensitivity<0||c.Sensitivity>5||c.Fov<0||c.Fov>120 {http.Error(w,"invalid input",400);return}
   b.mu.Lock(); if c.Active {if b.control.Active && time.Since(b.controlAt)<500*time.Millisecond {c.DX=math.Max(-2000,math.Min(2000,c.DX+b.control.DX));c.DY=math.Max(-2000,math.Min(2000,c.DY+b.control.DY));c.Jump=c.Jump||b.control.Jump}} else {c=Control{}};b.control=c;b.controlAt=time.Now();b.mu.Unlock();w.WriteHeader(204)
  })
 	mux.HandleFunc("/api/native", func(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +137,8 @@ func (b *Bridge) handler() http.Handler {
 		b.mu.RUnlock()
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Cache-Control", "no-store")
-		w.Write(nativePacket(s))
+		if r.URL.Query().Get("rev")==strconv.FormatUint(s.Scene,10) {s.Parts=nil}
+  w.Write(nativePacket(s))
 	})
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
@@ -132,27 +158,13 @@ func (b *Bridge) handler() http.Handler {
 			return
 		}
 		var u Update
-		d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20))
+		d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<20))
 		if d.Decode(&u) != nil || d.Decode(new(any)) != io.EOF || !valid(u) {
 			http.Error(w, "invalid scene update", 400)
 			return
 		}
-		b.mu.Lock()
-		b.state.Camera = u.Camera
-		b.state.Sun = u.Sun
-  changed:=false
-  if u.Parts!=nil && !slices.Equal(b.worldParts,*u.Parts) {b.worldParts=*u.Parts;changed=true}
-  if u.Avatar!=nil && !slices.Equal(b.avatarParts,*u.Avatar) {b.avatarParts=*u.Avatar;changed=true}
-  if changed { // Allocate a new slice; concurrent readers retain an immutable snapshot.
-   limit:=1024-len(b.avatarParts);if len(b.worldParts)<limit {limit=len(b.worldParts)}
-   combined:=make([]Part,0,limit+len(b.avatarParts));combined=append(combined,b.worldParts[:limit]...);combined=append(combined,b.avatarParts...);b.state.Parts=combined;b.state.Scene++
-  }
-		b.state.Seq++
-		b.state.Received = time.Now().UnixMilli()
-  c:=Control{}
   wantsControls:=r.URL.Path=="/api/update-controls" || r.URL.Query().Get("controls")=="1"
-  if wantsControls && time.Since(b.controlAt)<500*time.Millisecond {c=b.control;b.control.DX=0;b.control.DY=0;b.control.Jump=false}
-		b.mu.Unlock()
+  c:=b.apply(u,wantsControls)
   if wantsControls {w.Header().Set("Content-Type","application/json");json.NewEncoder(w).Encode(c);return}
 		w.WriteHeader(204)
 	}
@@ -173,7 +185,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("LUMEN GPU 0.2.3 | Native bridge at http://" + addr + " | Ctrl+C to stop")
+	fmt.Println("LUMEN GPU 0.3 | Native bridge at http://" + addr + " | Ctrl+C to stop")
 	s := http.Server{Handler: (&Bridge{}).handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
 	log.Fatal(s.Serve(l))
 }

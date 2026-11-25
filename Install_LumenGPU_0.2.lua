@@ -24,6 +24,7 @@ local input={}
 local lastInput=0
 local yaw,pitch=0,0
 local orbitDistance=10
+local oldFov=70
 local controls=nil
 local oldCameraType=nil
 local gui=Instance.new('ScreenGui'); gui.Name='LumenGPUConnection';gui.ResetOnSpawn=false;gui.DisplayOrder=100;gui.Parent=player:WaitForChild('PlayerGui')
@@ -38,7 +39,7 @@ local function release()
     if not external then return end
     external=false; input={}
     if controls then pcall(function() controls:Enable() end) end
-    local cam=workspace.CurrentCamera; if cam then cam.CameraType=oldCameraType or Enum.CameraType.Custom end
+    local cam=workspace.CurrentCamera; if cam then cam.CameraType=oldCameraType or Enum.CameraType.Custom;cam.FieldOfView=oldFov end
     local hum=player.Character and player.Character:FindFirstChildOfClass('Humanoid'); if hum then hum:Move(Vector3.zero,false) end
 end
 remote.OnClientEvent:Connect(function(kind,c)
@@ -46,7 +47,7 @@ remote.OnClientEvent:Connect(function(kind,c)
         status=tostring(c);lastAck=os.clock();return
     end
     if kind~='input' or not active or type(c)~='table' then return end
-    lastAck=os.clock();status=c.active and string.format('Input ON [%d,%d]',c.x or 0,c.z or 0) or 'Connected / Input OFF'
+    lastAck=os.clock();status=(c.transport or 'HTTP')..(c.active and string.format(' Input [%d,%d]',c.x or 0,c.z or 0) or ' Connected')
     if not c.active then release();return end
     lastInput=os.clock()
     if os.clock()-lastControlLog>2 then lastControlLog=os.clock();print('[LumenGPU] Input received: ',c.x,c.z,c.dx,c.dy) end
@@ -55,11 +56,14 @@ remote.OnClientEvent:Connect(function(kind,c)
         local look=cam.CFrame.LookVector; yaw=math.atan2(-look.X,-look.Z); pitch=math.asin(math.clamp(look.Y,-1,1))
         local char=player.Character;local head=char and char:FindFirstChild('Head')
         if head then orbitDistance=math.clamp((cam.CFrame.Position-head.Position).Magnitude,6,20) end
-        oldCameraType=cam.CameraType; external=true
+        oldCameraType=cam.CameraType;oldFov=cam.FieldOfView; external=true
         if controls then pcall(function() controls:Disable() end) end
         cam.CameraType=Enum.CameraType.Scriptable
     end
-    yaw-=math.clamp(c.dx or 0,-2000,2000)*.0025; pitch=math.clamp(pitch-math.clamp(c.dy or 0,-2000,2000)*.0025,-1.15,1.15)
+    local sensitivity=math.clamp(c.sensitivity or 1,.1,5)*.0025
+    if (c.distance or 0)>0 then orbitDistance=math.clamp(c.distance,2,40) end
+    if (c.fov or 0)>0 then cam.FieldOfView=math.clamp(c.fov,35,110) end
+    yaw-=math.clamp(c.dx or 0,-2000,2000)*sensitivity; pitch=math.clamp(pitch-math.clamp(c.dy or 0,-2000,2000)*sensitivity,-1.15,1.15)
     input=c;lastInput=os.clock()
     local hum=player.Character and player.Character:FindFirstChildOfClass('Humanoid'); if hum and c.jump then hum.Jump=true end
 end)
@@ -69,7 +73,7 @@ local function avatarSnapshot()
     for _,obj in char:GetDescendants() do
         if obj:IsA('BasePart') and obj.Name~='HumanoidRootPart' and obj.Transparency<.95 and obj:GetAttribute('PathIgnore')~=true and #list<64 then
             local c=obj.CFrame;local color=obj.Color
-            list[#list+1]={p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(obj.Size),c={color.R,color.G,color.B},metal=math.clamp(obj.Reflectance,0,1),rough=.55,emit=0}
+            list[#list+1]={p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(obj.Size),c={color.R,color.G,color.B},metal=math.clamp(obj.Reflectance,0,1),rough=.55,emit=0,transmission=0,ior=1.5}
         end
     end
     return list
@@ -108,7 +112,7 @@ RunService.Heartbeat:Connect(function(dt)
             end
         end
     end
-    elapsed+=dt; if elapsed<.10 then return end; elapsed=0
+    elapsed+=dt; if elapsed<1/60 then return end; elapsed=0
     local cam=workspace.CurrentCamera; if not cam then return end
     local c=cam.CFrame; remote:FireServer('camera',{p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),f=vec(c.LookVector),fov=cam.FieldOfView},avatarSnapshot())
 end)
@@ -125,46 +129,78 @@ local owner,latest=nil,nil
 local latestAvatar={}
 local lastSnapshot=-100
 local lastPartsJSON=nil
+local ws=nil;local wsOpen=false;local retryAt=0;local wsGeneration=0
+local function closeWS()
+    wsGeneration+=1;local old=ws;ws=nil;wsOpen=false
+    if old then pcall(function() old:Close() end) end
+end
+local function connectWS()
+    if ws or os.clock()<retryAt then return end
+    retryAt=os.clock()+5
+    local ok,c=pcall(function() return HTTP:CreateWebStreamClient(Enum.WebStreamClientType.WebSocket,{Url='ws://127.0.0.1:8765/api/ws'}) end)
+    if not ok or not c then warn('[LumenGPU] WebSocket unavailable; HTTP fallback: '..tostring(c));return end
+    ws=c;wsGeneration+=1;local generation=wsGeneration
+    c.Opened:Connect(function() if generation~=wsGeneration then return end;wsOpen=true;lastSnapshot=-100;lastPartsJSON=nil;print('[LumenGPU] WebSocket open') end)
+    c.MessageReceived:Connect(function(msg)
+        if generation~=wsGeneration or not owner then return end
+        local good,ctrl=pcall(function() return HTTP:JSONDecode(msg) end)
+        if good and type(ctrl)=='table' and not ctrl.error then ctrl.transport='WS';remote:FireClient(owner,'input',ctrl) elseif good then warn('[LumenGPU] WebSocket update rejected: '..tostring(ctrl.error)) end
+    end)
+    local function failed() if generation==wsGeneration then closeWS();retryAt=os.clock()+5;lastPartsJSON=nil end end
+    c.Closed:Connect(failed);c.Error:Connect(function(code,msg) warn('[LumenGPU] WS: '..tostring(code)..' '..tostring(msg));failed() end)
+    if c.ConnectionState.Name=='Open' then wsOpen=true;lastSnapshot=-100;lastPartsJSON=nil end
+    task.delay(3,function() if generation==wsGeneration and not wsOpen then failed() end end)
+end
 local function vec(v) return {v.X,v.Y,v.Z} end
 local function numeric(a,default,lo,hi) if type(a)~='number' or a~=a then return default end; return math.clamp(a,lo,hi) end
 local function snapshot(pos)
     local items={}
     for _,obj in workspace:GetDescendants() do
-        if obj:IsA('BasePart') and obj.Transparency<.95 and obj.Size.Magnitude>0 and obj:GetAttribute('PathIgnore')~=true and not (owner and owner.Character and obj:IsDescendantOf(owner.Character)) then
+        if obj:IsA('BasePart') and (obj.Transparency<.95 or obj.Material==Enum.Material.Glass) and obj.Size.Magnitude>0 and obj:GetAttribute('PathIgnore')~=true and not (owner and owner.Character and obj:IsDescendantOf(owner.Character)) then
             local localPos=obj.CFrame:PointToObjectSpace(pos);local half=obj.Size*.5
             -- A mesh approximated as a box can incorrectly enclose the entire camera.
-            if math.abs(localPos.X)<half.X and math.abs(localPos.Y)<half.Y and math.abs(localPos.Z)<half.Z then continue end
+            if obj:IsA('MeshPart') and math.abs(localPos.X)<half.X and math.abs(localPos.Y)<half.Y and math.abs(localPos.Z)<half.Z then continue end
             local c=obj.CFrame; local size=obj.Size; local color=obj.Color
-            local distance=(c.Position-pos).Magnitude-math.max(size.X,size.Y,size.Z)*.5
+            local transmission=numeric(obj:GetAttribute('PathTransmission'),obj.Material==Enum.Material.Glass and .98 or obj.Transparency,0,1)
+            local ior=numeric(obj:GetAttribute('PathIOR'),obj.Material==Enum.Material.Glass and 1.5 or 1.33,1,2.5)
             local metal=numeric(obj:GetAttribute('PathMetallic'),obj.Reflectance,0,1)
             local rough=numeric(obj:GetAttribute('PathRoughness'),.45,0,1)
             local emit=numeric(obj:GetAttribute('PathEmission'),obj.Material==Enum.Material.Neon and 3 or 0,0,50)
-            items[#items+1]={distance=distance,data={p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(size),c={color.R,color.G,color.B},metal=metal,rough=rough,emit=emit}}
+            items[#items+1]={p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(size),c={color.R,color.G,color.B},metal=metal,rough=rough,emit=emit,transmission=transmission,ior=ior}
         end
     end
-    table.sort(items,function(a,b) return a.distance<b.distance end)
-    local out={}; for i=1,math.min(960,#items) do out[i]=items[i].data end; return out
+    if #items>16320 then warn('[LumenGPU] Scene exceeds 16320 world parts; stable export cap reached') end
+    local out={}; for i=1,math.min(16320,#items) do out[i]=items[i] end; return out
 end
 remote.OnServerEvent:Connect(function(player,cmd,data,avatar)
     if cmd=='start' and (not owner or owner==player) then
         if not owner then owner=player; latest=nil; latestAvatar={}; lastSnapshot=-100; lastPartsJSON=nil; print('[LumenGPU] Local bridge started') end
         remote:FireClient(player,'status','Waiting for HTTP')
-    elseif cmd=='stop' and owner==player then owner=nil; latest=nil
+    elseif cmd=='stop' and owner==player then owner=nil; latest=nil;closeWS()
     elseif cmd=='camera' and owner==player and type(data)=='table' then
         if type(data.p)=='table' and #data.p==3 and type(data.r)=='table' and #data.r==3 and type(data.u)=='table' and #data.u==3 and type(data.f)=='table' and #data.f==3 and type(data.fov)=='number' then latest=data; if type(avatar)=='table' and #avatar<=64 then latestAvatar=avatar end end
     end
 end)
-Players.PlayerRemoving:Connect(function(p) if p==owner then owner=nil; latest=nil end end)
+Players.PlayerRemoving:Connect(function(p) if p==owner then owner=nil; latest=nil;closeWS() end end)
 local lastError=-100
-while task.wait(.135) do
+local lastHTTP=-100
+while task.wait(1/60) do
     if owner and latest then
         local ok,err=pcall(function()
-            local now=os.clock(); local update={camera=latest,sun=vec(Lighting:GetSunDirection()),avatar=latestAvatar}; local newJSON=nil
-            if now-lastSnapshot>=.65 then
+            local now=os.clock();connectWS()
+            if not wsOpen and now-lastHTTP<.15 then return end
+            local update={camera=latest,sun=vec(Lighting:GetSunDirection()),avatar=latestAvatar}; local newJSON=nil
+            if now-lastSnapshot>=1.0 then
                 lastSnapshot=now
                 local p=latest.p; local parts=snapshot(Vector3.new(p[1],p[2],p[3])); newJSON=HTTP:JSONEncode(parts)
                 if newJSON~=lastPartsJSON then update.parts=parts end
             end
+            if wsOpen and ws then
+                ws:Send(HTTP:JSONEncode(update))
+                if newJSON then lastPartsJSON=newJSON end
+                return
+            end
+            lastHTTP=now
             local result=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/update-controls',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode(update)})
             if not result.Success then error('HTTP '..result.StatusCode..' '..result.Body) end
             if owner then
@@ -180,4 +216,4 @@ while task.wait(.135) do
     end
 end
 ]====])
-print('LUMEN GPU 0.2.3 installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.3 installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')

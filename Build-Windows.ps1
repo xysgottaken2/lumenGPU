@@ -22,6 +22,8 @@ CheckExit
 CheckExit
 if (-not (Test-Path LumenBridge.exe)) {
     $env:GOOS='windows'; $env:GOARCH='amd64'; $env:CGO_ENABLED='0'
+    & go mod tidy
+    CheckExit
     & go build -trimpath -ldflags '-s -w' -o LumenBridge.exe .
     CheckExit
 }

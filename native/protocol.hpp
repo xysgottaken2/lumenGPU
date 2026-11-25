@@ -5,14 +5,14 @@
 #include <cmath>
 #include <stdexcept>
 struct V { float x,y,z; float operator[](int i) const { return i==0?x:i==1?y:z; } };
-struct Part { V p,r,u,b,s,c; float metal,rough,emit; };
+struct Part { V p,r,u,b,s,c; float metal,rough,emit,transmission=0,ior=1.5f; };
 struct Scene { uint64_t revision=0,seq=0; V p,r,u,f; float fov; V sun; std::vector<Part> parts; };
-static_assert(sizeof(V)==12 && sizeof(Part)==84);
+static_assert(sizeof(V)==12 && sizeof(Part)==92);
 inline Scene parse(const std::vector<unsigned char>& a) {
- if(a.size()<88||memcmp(a.data(),"LGR2",4)) throw std::runtime_error("Invalid bridge header");
+ if(a.size()<88||memcmp(a.data(),"LGR3",4)) throw std::runtime_error("Invalid bridge header");
  size_t at=4; auto read=[&](auto& v){if(at+sizeof(v)>a.size())throw std::runtime_error("Truncated bridge packet"); memcpy(&v,a.data()+at,sizeof(v));at+=sizeof(v);};
  Scene s; uint32_t count; read(s.revision);read(s.seq);read(count);
- if(count>1024||a.size()!=88+size_t(count)*84)throw std::runtime_error("Invalid bridge length");
+ if(count>16384||a.size()!=88+size_t(count)*92)throw std::runtime_error("Invalid bridge length");
  read(s.p);read(s.r);read(s.u);read(s.f);read(s.fov);read(s.sun);
  s.parts.resize(count); for(auto& p:s.parts)read(p);return s;
 }

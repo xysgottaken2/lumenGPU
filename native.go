@@ -5,11 +5,12 @@ import (
 	"encoding/binary"
 )
 
-// LGR2: magic, scene and sequence (u64), part count (u32), 16 camera/sun f32,
-// then 21 f32 per part. Explicit little endian, no native struct padding.
+// LGR3: magic, scene and sequence (u64), part count (u32), 16 camera/sun f32,
+// then 23 f32 per part. Explicit little endian, no native struct padding.
 func nativePacket(s State) []byte {
 	var b bytes.Buffer
-	b.WriteString("LGR2")
+	b.Grow(88+len(s.Parts)*92)
+ b.WriteString("LGR3")
 	put := func(v any) { binary.Write(&b, binary.LittleEndian, v) }
 	vec := func(v V) {
 		for _, x := range v {
@@ -35,6 +36,8 @@ func nativePacket(s State) []byte {
 		put(float32(p.Metal))
 		put(float32(p.Rough))
 		put(float32(p.Emit))
+  put(float32(p.Transmission))
+  put(float32(p.IOR))
 	}
 	return b.Bytes()
 }
