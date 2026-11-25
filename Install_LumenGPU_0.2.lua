@@ -370,34 +370,59 @@ local pendingMesh=nil
 local lastMeshUpload=-100
 local lastSnapshot=-100
 local lastPartsJSON=nil
-local ws=nil;local wsOpen=false;local retryAt=0;local wsGeneration=0
-local inflight=nil
-local function closeWS()
-    wsGeneration+=1;local old=ws;ws=nil;wsOpen=false;inflight=nil;sentAvatar=-1;lastPartsJSON=nil
-    if old then pcall(function() old:Close() end) end
+local cameraWS=nil;local geometryWS=nil
+local cameraOpen=false;local geometryOpen=false
+local cameraRetry=0;local geometryRetry=0
+local outstanding=0;local lastCameraAck=0
+local geometryPending=nil
+local function closeCamera()
+ local old=cameraWS;cameraWS=nil;cameraOpen=false;outstanding=0
+ if old then pcall(function() old:Close() end) end
 end
-local function connectWS()
-    if ws or os.clock()<retryAt then return end
-    retryAt=os.clock()+5
-    local ok,c=pcall(function() return HTTP:CreateWebStreamClient(Enum.WebStreamClientType.WebSocket,{Url='ws://127.0.0.1:8765/api/ws'}) end)
-    if not ok or not c then warn('[LumenGPU] WebSocket unavailable; HTTP fallback: '..tostring(c));return end
-    ws=c;wsGeneration+=1;local generation=wsGeneration
-    c.Opened:Connect(function() if generation~=wsGeneration then return end;wsOpen=true;lastSnapshot=-100;lastPartsJSON=nil;print('[LumenGPU] WebSocket open') end)
-    c.MessageReceived:Connect(function(msg)
-        if generation~=wsGeneration or not owner then return end
-        local packet=inflight;inflight=nil
-        local good,ctrl=pcall(function() return HTTP:JSONDecode(msg) end)
-        if good and type(ctrl)=='table' and not ctrl.error then
-            if packet then if packet.world then lastPartsJSON=packet.world end;if packet.avatar then sentAvatar=packet.avatar end end
-            ctrl.transport='WS';remote:FireClient(owner,'input',ctrl)
-        else
-            lastPartsJSON=nil;sentAvatar=-1;warn('[LumenGPU] WebSocket update rejected: '..tostring(good and type(ctrl)=='table' and ctrl.error or ctrl));remote:FireClient(owner,'status','Geometry rejected - see Output')
-        end
-    end)
-    local function failed() if generation==wsGeneration then closeWS();retryAt=os.clock()+5;lastPartsJSON=nil end end
-    c.Closed:Connect(failed);c.Error:Connect(function(code,msg) warn('[LumenGPU] WS: '..tostring(code)..' '..tostring(msg));failed() end)
-    if c.ConnectionState.Name=='Open' then wsOpen=true;lastSnapshot=-100;lastPartsJSON=nil end
-    task.delay(3,function() if generation==wsGeneration and not wsOpen then failed() end end)
+local function closeGeometry()
+ local old=geometryWS;geometryWS=nil;geometryOpen=false;geometryPending=nil;sentAvatar=-1;lastPartsJSON=nil
+ if old then pcall(function() old:Close() end) end
+end
+local function closeWS() closeCamera();closeGeometry() end
+local function connectCamera()
+ if cameraWS or os.clock()<cameraRetry then return end
+ cameraRetry=os.clock()+2
+ local ok,c=pcall(function() return HTTP:CreateWebStreamClient(Enum.WebStreamClientType.WebSocket,{Url='ws://127.0.0.1:8765/api/ws'}) end)
+ if not ok or not c then return end
+ cameraWS=c
+ local function opened() if cameraWS==c then cameraOpen=true;outstanding=0;lastCameraAck=os.clock() end end
+ c.Opened:Connect(opened)
+ c.MessageReceived:Connect(function(msg)
+  if cameraWS~=c or not owner then return end
+  outstanding=math.max(0,outstanding-1);lastCameraAck=os.clock()
+  local good,ctrl=pcall(function() return HTTP:JSONDecode(msg) end)
+  if good and type(ctrl)=='table' and not ctrl.error then ctrl.transport='WS';remote:FireClient(owner,'input',ctrl) end
+ end)
+ local function failed() if cameraWS==c then closeCamera();cameraRetry=os.clock()+1 end end
+ c.Closed:Connect(failed);c.Error:Connect(failed)
+ if c.ConnectionState.Name=='Open' then opened() end
+ task.delay(3,function() if cameraWS==c and not cameraOpen then failed() end end)
+end
+local function connectGeometry()
+ if geometryWS or os.clock()<geometryRetry then return end
+ geometryRetry=os.clock()+2
+ local ok,c=pcall(function() return HTTP:CreateWebStreamClient(Enum.WebStreamClientType.WebSocket,{Url='ws://127.0.0.1:8765/api/geometry-ws'}) end)
+ if not ok or not c then return end
+ geometryWS=c
+ local function opened() if geometryWS==c then geometryOpen=true;geometryPending=nil;lastPartsJSON=nil;sentAvatar=-1 end end
+ c.Opened:Connect(opened)
+ c.MessageReceived:Connect(function(msg)
+  if geometryWS~=c then return end
+  local packet=geometryPending;geometryPending=nil
+  local good,reply=pcall(function() return HTTP:JSONDecode(msg) end)
+  if good and type(reply)=='table' and not reply.error then
+   if packet then if packet.world then lastPartsJSON=packet.world end;if packet.avatar then sentAvatar=packet.avatar end end
+  else lastPartsJSON=nil;sentAvatar=-1;warn('[LumenGPU] Geometry update rejected') end
+ end)
+ local function failed() if geometryWS==c then closeGeometry();geometryRetry=os.clock()+1 end end
+ c.Closed:Connect(failed);c.Error:Connect(failed)
+ if c.ConnectionState.Name=='Open' then opened() end
+ task.delay(3,function() if geometryWS==c and not geometryOpen then failed() end end)
 end
 local function vec(v) return {v.X,v.Y,v.Z} end
 remote.OnServerEvent:Connect(function(player,cmd,data,avatar)
@@ -431,44 +456,60 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar)
     end
 end)
 Players.PlayerRemoving:Connect(function(p) if p==owner then owner=nil; latest=nil;closeWS() end end)
-local lastError=-100
+-- Camera/control and geometry use independent persistent channels.
+-- A small window permits pipelining without an unbounded queue.
 local lastHTTP=-100
-while task.wait(1/60) do
-    if owner and latest then
-        local ok,err=pcall(function()
-            local now=os.clock();connectWS()
-            -- Never queue old camera packets behind an unacknowledged WebSocket update.
-            if wsOpen and inflight then
-                if now-inflight.at>1 then closeWS();retryAt=now+1 else return end
-            end
-            if not wsOpen and now-lastHTTP<.15 then return end
-            local update={camera=latest,sun=vec(Lighting:GetSunDirection())}; local newJSON=nil;local newAvatar=nil
-            if sentAvatar~=avatarSerial then update.avatar=latestAvatar;newAvatar=avatarSerial end
-            if latestWorld and lastPartsJSON~=worldSerial then
-                lastSnapshot=now;newJSON=worldSerial;update.parts=latestWorld
-            end
-            if wsOpen and ws then
-                local payload=HTTP:JSONEncode(update)
-                inflight={at=now,world=newJSON,avatar=newAvatar}
-                local sent,err=pcall(function() ws:Send(payload) end)
-                if not sent then closeWS();retryAt=now+1;error(err) end
-                return
-            end
-            lastHTTP=now
-            local result=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/update-controls',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode(update)})
-            if not result.Success then error('HTTP '..result.StatusCode..' '..result.Body) end
-            if owner then
-                if result.StatusCode==204 or result.Body=='' then remote:FireClient(owner,'status','Old bridge - update EXE')
-                else local ctrl=HTTP:JSONDecode(result.Body);remote:FireClient(owner,'input',ctrl) end
-            end
-            if newJSON then lastPartsJSON=newJSON end
-            if newAvatar then sentAvatar=newAvatar end
-        end)
-        if not ok and os.clock()-lastError>2 then
-            lastError=os.clock();warn('[LumenGPU] '..tostring(err)..' | Start EXE, enable HTTP Requests, use local Studio Play.')
-            if owner then remote:FireClient(owner,'status','HTTP error - see Output') end
-        end
+local lastError=-100
+task.spawn(function()
+ while task.wait(1/120) do
+  if owner and latest then
+   local ok,err=pcall(function()
+    connectCamera()
+    local now=os.clock()
+    if cameraOpen then
+     if outstanding>0 and now-lastCameraAck>.75 then closeCamera();return end
+     if outstanding>=4 then return end
+     local payload=HTTP:JSONEncode({camera=latest,sun=vec(Lighting:GetSunDirection())})
+     outstanding+=1
+     local sent,e=pcall(function() cameraWS:Send(payload) end)
+     if not sent then closeCamera();error(e) end
+    elseif now-lastHTTP>=.15 then
+     -- Compatibility fallback retains geometry when both sockets are unavailable.
+     lastHTTP=now
+     local update={camera=latest,sun=vec(Lighting:GetSunDirection())}
+     local w,a=nil,nil
+     if not geometryOpen then
+      if latestWorld and lastPartsJSON~=worldSerial then update.parts=latestWorld;w=worldSerial end
+      if sentAvatar~=avatarSerial then update.avatar=latestAvatar;a=avatarSerial end
+     end
+     local res=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/update-controls',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode(update)})
+     if not res.Success then error('HTTP '..res.StatusCode) end
+     if w then lastPartsJSON=w end;if a then sentAvatar=a end
+     if owner then local ctrl=HTTP:JSONDecode(res.Body);ctrl.transport='HTTP';remote:FireClient(owner,'input',ctrl) end
     end
+   end)
+   if not ok and os.clock()-lastError>2 then lastError=os.clock();warn('[LumenGPU] Camera: '..tostring(err)) end
+  end
+ end
+end)
+local lastGeom=0
+while task.wait(1/60) do
+ if owner and latest then
+  local ok,err=pcall(function()
+   connectGeometry()
+   if not geometryOpen then return end
+   local now=os.clock()
+   if geometryPending then if now-geometryPending.at>2 then closeGeometry() end;return end
+   local update={camera=latest,sun=vec(Lighting:GetSunDirection())};local w,a=nil,nil
+   if latestWorld and lastPartsJSON~=worldSerial then update.parts=latestWorld;w=worldSerial end
+   if sentAvatar~=avatarSerial then update.avatar=latestAvatar;a=avatarSerial end
+   if not w and not a and now-lastGeom<1 then return end
+   lastGeom=now;geometryPending={at=now,world=w,avatar=a}
+   local sent,e=pcall(function() geometryWS:Send(HTTP:JSONEncode(update)) end)
+   if not sent then closeGeometry();error(e) end
+  end)
+  if not ok then warn('[LumenGPU] Geometry: '..tostring(err)) end
+ end
 end
 ]====])
-print('LUMEN GPU 0.5 mesh support installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.6 low-latency transport installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')

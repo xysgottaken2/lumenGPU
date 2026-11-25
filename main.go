@@ -106,10 +106,10 @@ func valid(u Update) bool {
 	}
 	return true
 }
-func (b *Bridge) apply(u Update,wantsControls bool) Control {
+func (b *Bridge) apply(u Update,wantsControls bool) Control {return b.applyMode(u,wantsControls,false)}
+func (b *Bridge) applyMode(u Update,wantsControls,geometryOnly bool) Control {
 		b.mu.Lock()
-		b.state.Camera = u.Camera
-		b.state.Sun = u.Sun
+ if !geometryOnly {b.state.Camera=u.Camera;b.state.Sun=u.Sun}
   changed:=false
   if u.Parts!=nil && !slices.Equal(b.worldParts,*u.Parts) {b.worldParts=*u.Parts;changed=true}
   if u.Avatar!=nil && !slices.Equal(b.avatarParts,*u.Avatar) {b.avatarParts=*u.Avatar;changed=true}
@@ -117,8 +117,7 @@ func (b *Bridge) apply(u Update,wantsControls bool) Control {
    limit:=16384-len(b.avatarParts);if len(b.worldParts)<limit {limit=len(b.worldParts)}
    combined:=make([]Part,0,limit+len(b.avatarParts));combined=append(combined,b.worldParts[:limit]...);combined=append(combined,b.avatarParts...);b.state.Parts=combined;b.state.Scene++
   }
-		b.state.Seq++
-		b.state.Received = time.Now().UnixMilli()
+if !geometryOnly {b.state.Seq++;b.state.Received=time.Now().UnixMilli()}
   c:=Control{}
   if wantsControls && time.Since(b.controlAt)<500*time.Millisecond {c=b.control;b.control.DX=0;b.control.DY=0;b.control.Jump=false}
  b.mu.Unlock();return c
@@ -126,11 +125,16 @@ func (b *Bridge) apply(u Update,wantsControls bool) Control {
 func (b *Bridge) handler() http.Handler {
 	mux := http.NewServeMux()
  mux.HandleFunc("/api/ws",b.stream)
+ mux.HandleFunc("/api/geometry-ws",b.geometryStream)
+ mux.HandleFunc("/api/native-camera-ws",func(w http.ResponseWriter,r *http.Request){b.nativeStream(w,r,false)})
+ mux.HandleFunc("/api/native-geometry-ws",func(w http.ResponseWriter,r *http.Request){b.nativeStream(w,r,true)})
+ mux.HandleFunc("/api/native-input-ws",b.inputStream)
  mux.HandleFunc("/api/mesh",b.meshHandler)
  mux.HandleFunc("/api/input", func(w http.ResponseWriter,r *http.Request){
   if r.Method!="POST" || r.Header.Get("Origin")!="" {http.Error(w,"native POST only",403);return}
-  var c Control; d:=json.NewDecoder(http.MaxBytesReader(w,r.Body,4096)); if d.Decode(&c)!=nil || d.Decode(new(any))!=io.EOF || !finite(c.X)||!finite(c.Z)||!finite(c.DX)||!finite(c.DY)||math.Abs(c.X)>1||math.Abs(c.Z)>1||math.Abs(c.DX)>2000||math.Abs(c.DY)>2000 || !finite(c.Distance)||!finite(c.Sensitivity)||!finite(c.Fov)||c.Distance<0||c.Distance>40||c.Sensitivity<0||c.Sensitivity>5||c.Fov<0||c.Fov>120 {http.Error(w,"invalid input",400);return}
-  b.mu.Lock(); if c.Active {if b.control.Active && time.Since(b.controlAt)<500*time.Millisecond {c.DX=math.Max(-2000,math.Min(2000,c.DX+b.control.DX));c.DY=math.Max(-2000,math.Min(2000,c.DY+b.control.DY));c.Jump=c.Jump||b.control.Jump}} else {c=Control{}};b.control=c;b.controlAt=time.Now();b.mu.Unlock();w.WriteHeader(204)
+  var c Control;d:=json.NewDecoder(http.MaxBytesReader(w,r.Body,4096))
+  if d.Decode(&c)!=nil||d.Decode(new(any))!=io.EOF||!validControl(c){http.Error(w,"invalid input",400);return}
+  b.storeControl(c);w.WriteHeader(204)
  })
 	mux.HandleFunc("/api/native", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" || r.Header.Get("Origin") != "" {
@@ -190,7 +194,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("LUMEN GPU 0.5 | Native bridge at http://" + addr + " | Ctrl+C to stop")
+	fmt.Println("LUMEN GPU 0.6 | Native bridge at http://" + addr + " | Ctrl+C to stop")
 	s := http.Server{Handler: (&Bridge{}).handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
 	log.Fatal(s.Serve(l))
 }
