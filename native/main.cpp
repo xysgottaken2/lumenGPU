@@ -40,7 +40,7 @@ void network(){
  while(!stop){try{sendInput(conn.h);uint64_t cachedRev;{std::lock_guard<std::mutex> lk(mtx);cachedRev=incoming.revision;}std::wstring route=L"/api/native?rev="+std::to_wstring(cachedRev);Http req{WinHttpOpenRequest(conn.h,L"GET",route.c_str(),nullptr,WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,0)};
  if(!req.h||!WinHttpSendRequest(req.h,WINHTTP_NO_ADDITIONAL_HEADERS,0,WINHTTP_NO_REQUEST_DATA,0,0,0)||!WinHttpReceiveResponse(req.h,nullptr))throw std::runtime_error("bridge unavailable");
  DWORD status=0,sz=sizeof(status); if(!WinHttpQueryHeaders(req.h,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,WINHTTP_HEADER_NAME_BY_INDEX,&status,&sz,WINHTTP_NO_HEADER_INDEX)||status!=200)throw std::runtime_error("bridge response");
- std::vector<unsigned char> data; unsigned char tmp[4096]; DWORD got=0; do{if(!WinHttpReadData(req.h,tmp,sizeof(tmp),&got))throw std::runtime_error("bridge read"); data.insert(data.end(),tmp,tmp+got);if(data.size()>1600000)throw std::runtime_error("bridge size");}while(got);
+ std::vector<unsigned char> data; unsigned char tmp[4096]; DWORD got=0; do{if(!WinHttpReadData(req.h,tmp,sizeof(tmp),&got))throw std::runtime_error("bridge read"); data.insert(data.end(),tmp,tmp+got);if(data.size()>2000000)throw std::runtime_error("bridge size");}while(got);
  Scene s=parse(data); {std::lock_guard<std::mutex> lk(mtx); if(s.revision==incoming.revision && s.parts.empty() && s.seq>=incoming.seq)s.parts=std::move(incoming.parts);incoming=std::move(s); connected=incoming.seq!=0;}
  }catch(...){std::lock_guard<std::mutex> lk(mtx);connected=false;} std::this_thread::sleep_for(8ms);}
 }

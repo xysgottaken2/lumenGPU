@@ -202,9 +202,9 @@ workspace.DescendantRemoving:Connect(function(obj)
  if tracked[obj] then for _,c in tracked[obj] do c:Disconnect() end;tracked[obj]=nil;dynamic[obj]=nil;dirty=true end
 end)
 local function snapshot()
- local out={};local compact={}
+ local out={};local compact={};local seen={}
  for _,obj in order do
-  if tracked[obj] then compact[#compact+1]=obj
+  if tracked[obj] and not seen[obj] then seen[obj]=true;compact[#compact+1]=obj
    if not dynamic[obj] and eligible(obj) and #out<15360 then out[#out+1]=materialPart(obj) end
   end
  end

@@ -61,7 +61,7 @@ float3 path(float3 o,float3 d,inout uint seed,out float4 guide,out float4 alb){
    float3 f=evalBSDF(n,wo,wi,c,metal,rough,ior,spec,prob,pdf);
    if(nl>0&&quality.z>0&&!blocked(p+n*.003,wi))L+=beta*f*opaque*nl*float3(5,4.65,4)*quality.z;
    if(switches.x>0){float z=rnd(seed),phi=2*PI*rnd(seed),r=sqrt(1-z*z);wi=basis(n,r*cos(phi),r*sin(phi),z);f=evalBSDF(n,wo,wi,c,metal,rough,ior,spec,prob,pdf);
-    float lp=1/(2*PI);if(!blocked(p+n*.003,wi))L+=beta*f*opaque*sky(wi)*(z/lp)*powerWeight(lp,pdf*opaque);}
+    float lp=1/(2*PI);if(!blocked(p+n*.003,wi))L+=beta*f*opaque*sky(wi)*(z/lp)*(i==uint(options.x)?1:powerWeight(lp,pdf*opaque));}
   }
   if(i==uint(options.x))break;
   if(trans>0&&(!entering||rnd(seed)<trans)){
