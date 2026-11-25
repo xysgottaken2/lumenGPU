@@ -121,7 +121,7 @@ func (b *Bridge) handler() http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		json.NewEncoder(w).Encode(s)
 	})
-	mux.HandleFunc("/api/update", func(w http.ResponseWriter, r *http.Request) {
+	updateHandler:=func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" || r.Header.Get("Origin") != "" {
 			http.Error(w, "Studio POST only", 403)
 			return
@@ -142,11 +142,14 @@ func (b *Bridge) handler() http.Handler {
 		b.state.Seq++
 		b.state.Received = time.Now().UnixMilli()
   c:=Control{}
-  if r.URL.Query().Get("controls")=="1" && time.Since(b.controlAt)<500*time.Millisecond {c=b.control;b.control.DX=0;b.control.DY=0;b.control.Jump=false}
+  wantsControls:=r.URL.Path=="/api/update-controls" || r.URL.Query().Get("controls")=="1"
+  if wantsControls && time.Since(b.controlAt)<500*time.Millisecond {c=b.control;b.control.DX=0;b.control.DY=0;b.control.Jump=false}
 		b.mu.Unlock()
-  if r.URL.Query().Get("controls")=="1" {w.Header().Set("Content-Type","application/json");json.NewEncoder(w).Encode(c);return}
+  if wantsControls {w.Header().Set("Content-Type","application/json");json.NewEncoder(w).Encode(c);return}
 		w.WriteHeader(204)
-	})
+	}
+ mux.HandleFunc("/api/update",updateHandler)
+ mux.HandleFunc("/api/update-controls",updateHandler)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Host != addr && r.Host != "localhost:8765" {
 			http.Error(w, "loopback host only", 403)
@@ -162,7 +165,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("LUMEN GPU 0.2.1 | Native bridge at http://" + addr + " | Ctrl+C to stop")
+	fmt.Println("LUMEN GPU 0.2.2 | Native bridge at http://" + addr + " | Ctrl+C to stop")
 	s := http.Server{Handler: (&Bridge{}).handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
 	log.Fatal(s.Serve(l))
 }

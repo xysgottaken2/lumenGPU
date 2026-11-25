@@ -1,7 +1,5 @@
-# LUMEN GPU 0.2.1 — Native DXR
+# LUMEN GPU 0.2.2 — Native DXR
 
-Experimental local Roblox Studio renderer using DXR 1.1. See [setup and limitations](README.txt). Build artifacts: [Actions](../../actions).
+Local Roblox Studio DXR prototype. See [setup and limitations](README.txt). [Build artifacts](../../actions).
 
-- F2: capture/release movement in the native window; WASD, mouse, Space. Esc releases capture. Controls expire on disconnect.
-- F3: cycle path tracing, albedo, normals, sky-only. F4/F5: exposure down/up.
-- Reinstall the packaged Command Bar script to enable the new control protocol.
+F2 captures mouse/WASD/Space in the renderer. Title shows F2 ON/OFF, HTTP response (204 = input accepted), movement axes. Studio status reports Input ON/OFF. Reinstall the Lua and replace both executables together.

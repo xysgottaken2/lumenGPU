@@ -30,6 +30,9 @@ local button=Instance.new('TextButton');button.Name='Toggle';button.Size=UDim2.f
 local lastAck=0
 local lastRetry=0
 local status='Waiting for bridge'
+local lastControlLog=0
+local playerModule=player:WaitForChild('PlayerScripts'):FindFirstChild('PlayerModule')
+if playerModule then local ok,m=pcall(require,playerModule); if ok then local success,ctrl=pcall(function() return m:GetControls() end); if success then controls=ctrl end end end
 local function release()
     if not external then return end
     external=false; input={}
@@ -42,13 +45,15 @@ remote.OnClientEvent:Connect(function(kind,c)
         status=tostring(c);lastAck=os.clock();return
     end
     if kind~='input' or not active or type(c)~='table' then return end
-    lastAck=os.clock();status='Connected'
+    lastAck=os.clock();status=c.active and string.format('Input ON [%d,%d]',c.x or 0,c.z or 0) or 'Connected / Input OFF'
     if not c.active then release();return end
+    lastInput=os.clock()
+    if os.clock()-lastControlLog>2 then lastControlLog=os.clock();print('[LumenGPU] Input received: ',c.x,c.z,c.dx,c.dy) end
     local cam=workspace.CurrentCamera; if not cam then return end
     if not external then
         local look=cam.CFrame.LookVector; yaw=math.atan2(-look.X,-look.Z); pitch=math.asin(math.clamp(look.Y,-1,1))
         oldCameraType=cam.CameraType; external=true
-        pcall(function() controls=require(player.PlayerScripts:WaitForChild('PlayerModule')):GetControls();controls:Disable() end)
+        if controls then pcall(function() controls:Disable() end) end
         cam.CameraType=Enum.CameraType.Scriptable
     end
     yaw-=math.clamp(c.dx or 0,-2000,2000)*.0025; pitch=math.clamp(pitch-math.clamp(c.dy or 0,-2000,2000)*.0025,-1.50,1.50)
@@ -68,7 +73,8 @@ UIS.InputBegan:Connect(function(i,processed)
     if i.KeyCode==Enum.KeyCode.P and not UIS:GetFocusedTextBox() then toggle() end
 end)
 local elapsed=0
-RunService:BindToRenderStep('LumenGPUExternal',Enum.RenderPriority.Camera.Value+2,function(dt)
+-- Heartbeat continues independently of presentation/render-step scheduling.
+RunService.Heartbeat:Connect(function(dt)
     if not active then return end
     local now=os.clock()
     if now-lastAck>2 and now-lastRetry>2 then lastRetry=now;remote:FireServer('start') end
@@ -140,10 +146,10 @@ while task.wait(.15) do
                 local p=latest.p; local parts=snapshot(Vector3.new(p[1],p[2],p[3])); newJSON=HTTP:JSONEncode(parts)
                 if newJSON~=lastPartsJSON then update.parts=parts end
             end
-            local result=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/update?controls=1',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode(update)})
+            local result=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/update-controls',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode(update)})
             if not result.Success then error('HTTP '..result.StatusCode..' '..result.Body) end
             if owner then
-                if result.StatusCode==204 or result.Body=='' then remote:FireClient(owner,'status','Connected (old bridge)')
+                if result.StatusCode==204 or result.Body=='' then remote:FireClient(owner,'status','Old bridge - update EXE')
                 else local ctrl=HTTP:JSONDecode(result.Body);remote:FireClient(owner,'input',ctrl) end
             end
             if newJSON then lastPartsJSON=newJSON end
@@ -155,4 +161,4 @@ while task.wait(.15) do
     end
 end
 ]====])
-print('LUMEN GPU 0.2.1 connection hotfix installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.2.2 installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
