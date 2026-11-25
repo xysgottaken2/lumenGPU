@@ -36,6 +36,9 @@ type Part struct {
 	Emit  float64 `json:"emit"`
  Transmission float64 `json:"transmission"`
  IOR float64 `json:"ior"`
+ Shape float64 `json:"shape"`
+ Specular float64 `json:"specular"`
+ EmissionColor V `json:"emissionColor"`
 }
 type Update struct {
 	Camera Camera  `json:"camera"`
@@ -82,19 +85,19 @@ func valid(u Update) bool {
 	}
 	for _, group:=range []*[]Part{u.Parts,u.Avatar} {
  if group==nil {continue}
-		if len(*group) > 16384 || (group==u.Avatar && len(*group)>64) {
+		if len(*group) > 16384 || (group==u.Avatar && len(*group)>1024) {
 			return false
 		}
 		for _, p := range *group {
-			if !vec(p.P) || !axis(p.R) || !axis(p.U) || !axis(p.B) || !vec(p.S) || !vec(p.C) || !finite(p.Metal) || !finite(p.Rough) || !finite(p.Emit) || !finite(p.Transmission) || !finite(p.IOR) {
+			if !vec(p.P) || !axis(p.R) || !axis(p.U) || !axis(p.B) || !vec(p.S) || !vec(p.C) || !finite(p.Metal) || !finite(p.Rough) || !finite(p.Emit) || !finite(p.Transmission) || !finite(p.IOR) || !finite(p.Shape) || !finite(p.Specular) || !vec(p.EmissionColor) {
 				return false
 			}
 			for i := 0; i < 3; i++ {
-				if p.S[i] <= 0 || p.S[i] > 1e5 || p.C[i] < 0 || p.C[i] > 1 {
+				if p.S[i] <= 0 || p.S[i] > 1e5 || p.C[i] < 0 || p.C[i] > 1 || p.EmissionColor[i]<0 || p.EmissionColor[i]>1 {
 					return false
 				}
 			}
-			if p.Metal < 0 || p.Metal > 1 || p.Rough < 0 || p.Rough > 1 || p.Emit < 0 || p.Emit > 50 || p.Transmission<0 || p.Transmission>1 || (p.IOR!=0 && (p.IOR<1 || p.IOR>2.5)) {
+			if p.Metal < 0 || p.Metal > 1 || p.Rough < 0 || p.Rough > 1 || p.Emit < 0 || p.Emit > 50 || p.Transmission<0 || p.Transmission>1 || (p.IOR!=0 && (p.IOR<1 || p.IOR>3)) || p.Shape<0 || p.Shape>2 || p.Shape!=math.Trunc(p.Shape) || p.Specular<0 || p.Specular>1 {
 				return false
 			}
 		}
@@ -184,7 +187,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("LUMEN GPU 0.3 | Native bridge at http://" + addr + " | Ctrl+C to stop")
+	fmt.Println("LUMEN GPU 0.4 | Native bridge at http://" + addr + " | Ctrl+C to stop")
 	s := http.Server{Handler: (&Bridge{}).handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
 	log.Fatal(s.Serve(l))
 }

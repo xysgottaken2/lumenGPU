@@ -1,3 +1,5 @@
-# LUMEN GPU 0.3.1 — lighting regression hotfix
+# LUMEN GPU 0.4 — material and denoise update
 
-Excludes unsupported Terrain from box export, dynamically suppresses opaque camera-enclosing proxy boxes, adds direct sun and sky visibility debug views. F3 cycles views 0–5, or select them in Dear ImGui. Title reports skipped proxies. Install matching Lua and renderer. [Setup](README.txt) | [Windows builds](../../actions)
+[Windows builds](../../actions) | [Setup](README.txt)
+
+GGX/Lambert BSDF, sky MIS, soft sun, exact Fresnel dielectric branch, GPU normal/depth/albedo-guided spatial denoiser, live render scale, sphere/cylinder primitive BLAS, fast moving-part snapshots. No DLSS or arbitrary asset meshes yet. Use matching LGR4 Lua, bridge, executable and both shaders.

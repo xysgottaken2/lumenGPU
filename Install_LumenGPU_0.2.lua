@@ -68,12 +68,26 @@ remote.OnClientEvent:Connect(function(kind,c)
     local hum=player.Character and player.Character:FindFirstChildOfClass('Humanoid'); if hum and c.jump then hum.Jump=true end
 end)
 local function vec(v) return {v.X,v.Y,v.Z} end
+local function materialPart(obj)
+    local function num(k,v,lo,hi)
+        local x=obj:GetAttribute(k);if type(x)~='number' or x~=x then return v end;return math.clamp(x,lo,hi)
+    end
+    local mat=obj.Material
+    local metal=(mat==Enum.Material.Metal or mat==Enum.Material.CorrodedMetal or mat==Enum.Material.DiamondPlate or mat==Enum.Material.Foil) and 1 or 0
+    local rough=metal==1 and .28 or .65
+    if mat==Enum.Material.Glass or mat==Enum.Material.Ice then rough=.08 end
+    if mat~=Enum.Material.Glass then local r=math.clamp(obj.Reflectance,0,1);rough=rough+(.045-rough)*r;metal=math.max(metal,r) end
+    local color=obj:GetAttribute('PathBaseColor');if typeof(color)~='Color3' then color=obj.Color end
+    local ec=obj:GetAttribute('PathEmissionColor');if typeof(ec)~='Color3' then ec=color end
+    local c=obj.CFrame;local shape=0
+    if obj:IsA('Part') then if obj.Shape==Enum.PartType.Ball then shape=1 elseif obj.Shape==Enum.PartType.Cylinder then shape=2 end end
+    return {p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(obj.Size),c={color.R,color.G,color.B},metal=num('PathMetallic',metal,0,1),rough=num('PathRoughness',rough,.025,1),emit=num('PathEmission',(obj:GetAttribute('PathEmissive')==true or mat==Enum.Material.Neon) and 4 or 0,0,50),transmission=num('PathTransmission',mat==Enum.Material.Glass and 1 or obj.Transparency,0,1),ior=num('PathIOR',1.5,1.001,3),shape=shape,specular=num('PathSpecular',1,0,1),emissionColor={ec.R,ec.G,ec.B}}
+end
 local function avatarSnapshot()
     local list={};local char=player.Character;if not char then return list end
     for _,obj in char:GetDescendants() do
         if obj:IsA('BasePart') and obj.Name~='HumanoidRootPart' and obj.Transparency<.95 and obj:GetAttribute('PathIgnore')~=true and #list<64 then
-            local c=obj.CFrame;local color=obj.Color
-            list[#list+1]={p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(obj.Size),c={color.R,color.G,color.B},metal=math.clamp(obj.Reflectance,0,1),rough=.55,emit=0,transmission=0,ior=1.5}
+            list[#list+1]=materialPart(obj)
         end
     end
     return list
@@ -152,23 +166,58 @@ local function connectWS()
     task.delay(3,function() if generation==wsGeneration and not wsOpen then failed() end end)
 end
 local function vec(v) return {v.X,v.Y,v.Z} end
-local function numeric(a,default,lo,hi) if type(a)~='number' or a~=a then return default end; return math.clamp(a,lo,hi) end
-local function snapshot(pos)
-    local items={}
-    for _,obj in workspace:GetDescendants() do
-        if obj:IsA('BasePart') and not obj:IsA('Terrain') and (obj.Transparency<.95 or obj.Material==Enum.Material.Glass) and obj.Size.Magnitude>0 and obj:GetAttribute('PathIgnore')~=true and not (owner and owner.Character and obj:IsDescendantOf(owner.Character)) then
-            -- Native renderer filters camera-containing opaque boxes dynamically.
-            local c=obj.CFrame; local size=obj.Size; local color=obj.Color
-            local transmission=numeric(obj:GetAttribute('PathTransmission'),obj.Material==Enum.Material.Glass and .98 or obj.Transparency,0,1)
-            local ior=numeric(obj:GetAttribute('PathIOR'),obj.Material==Enum.Material.Glass and 1.5 or 1.33,1,2.5)
-            local metal=numeric(obj:GetAttribute('PathMetallic'),obj.Reflectance,0,1)
-            local rough=numeric(obj:GetAttribute('PathRoughness'),.45,0,1)
-            local emit=numeric(obj:GetAttribute('PathEmission'),obj.Material==Enum.Material.Neon and 3 or 0,0,50)
-            items[#items+1]={p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(size),c={color.R,color.G,color.B},metal=metal,rough=rough,emit=emit,transmission=transmission,ior=ior}
-        end
+local function materialPart(obj)
+    local function num(k,v,lo,hi)
+        local x=obj:GetAttribute(k);if type(x)~='number' or x~=x then return v end;return math.clamp(x,lo,hi)
     end
-    if #items>16320 then warn('[LumenGPU] Scene exceeds 16320 world parts; stable export cap reached') end
-    local out={}; for i=1,math.min(16320,#items) do out[i]=items[i] end; return out
+    local mat=obj.Material
+    local metal=(mat==Enum.Material.Metal or mat==Enum.Material.CorrodedMetal or mat==Enum.Material.DiamondPlate or mat==Enum.Material.Foil) and 1 or 0
+    local rough=metal==1 and .28 or .65
+    if mat==Enum.Material.Glass or mat==Enum.Material.Ice then rough=.08 end
+    if mat~=Enum.Material.Glass then local r=math.clamp(obj.Reflectance,0,1);rough=rough+(.045-rough)*r;metal=math.max(metal,r) end
+    local color=obj:GetAttribute('PathBaseColor');if typeof(color)~='Color3' then color=obj.Color end
+    local ec=obj:GetAttribute('PathEmissionColor');if typeof(ec)~='Color3' then ec=color end
+    local c=obj.CFrame;local shape=0
+    if obj:IsA('Part') then if obj.Shape==Enum.PartType.Ball then shape=1 elseif obj.Shape==Enum.PartType.Cylinder then shape=2 end end
+    return {p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(obj.Size),c={color.R,color.G,color.B},metal=num('PathMetallic',metal,0,1),rough=num('PathRoughness',rough,.025,1),emit=num('PathEmission',(obj:GetAttribute('PathEmissive')==true or mat==Enum.Material.Neon) and 4 or 0,0,50),transmission=num('PathTransmission',mat==Enum.Material.Glass and 1 or obj.Transparency,0,1),ior=num('PathIOR',1.5,1.001,3),shape=shape,specular=num('PathSpecular',1,0,1),emissionColor={ec.R,ec.G,ec.B}}
+end
+-- Promote physics and scripted moving parts out of the slow world snapshot.
+local tracked={};local dynamic={};local order={};local dirty=true
+local function eligible(obj)
+ return obj:IsA('BasePart') and not obj:IsA('Terrain') and obj.Name~='HumanoidRootPart' and (obj.Transparency<.95 or obj.Material==Enum.Material.Glass) and obj.Size.Magnitude>0 and obj:GetAttribute('PathIgnore')~=true and not (owner and owner.Character and obj:IsDescendantOf(owner.Character))
+end
+local function track(obj)
+ if not obj:IsA('BasePart') or obj:IsA('Terrain') or tracked[obj] then return end
+ order[#order+1]=obj
+ tracked[obj]={}
+ local function promote() if not dynamic[obj] then dynamic[obj]=true;dirty=true end end
+ tracked[obj][1]=obj:GetPropertyChangedSignal('CFrame'):Connect(promote)
+ tracked[obj][2]=obj:GetPropertyChangedSignal('Anchored'):Connect(promote)
+ if not obj.Anchored then dynamic[obj]=true end
+ dirty=true
+end
+for _,obj in workspace:GetDescendants() do track(obj) end
+workspace.DescendantAdded:Connect(track)
+workspace.DescendantRemoving:Connect(function(obj)
+ if tracked[obj] then for _,c in tracked[obj] do c:Disconnect() end;tracked[obj]=nil;dynamic[obj]=nil;dirty=true end
+end)
+local function snapshot()
+ local out={};local compact={}
+ for _,obj in order do
+  if tracked[obj] then compact[#compact+1]=obj
+   if not dynamic[obj] and eligible(obj) and #out<15360 then out[#out+1]=materialPart(obj) end
+  end
+ end
+ order=compact
+ return out
+end
+local function dynamicSnapshot()
+ local out={}
+ for _,obj in order do
+  if dynamic[obj] and eligible(obj) and #out<960 then out[#out+1]=materialPart(obj) end
+ end
+ for _,part in latestAvatar do if #out<1024 then out[#out+1]=part end end
+ return out
 end
 remote.OnServerEvent:Connect(function(player,cmd,data,avatar)
     if cmd=='start' and (not owner or owner==player) then
@@ -187,10 +236,11 @@ while task.wait(1/60) do
         local ok,err=pcall(function()
             local now=os.clock();connectWS()
             if not wsOpen and now-lastHTTP<.15 then return end
-            local update={camera=latest,sun=vec(Lighting:GetSunDirection()),avatar=latestAvatar}; local newJSON=nil
-            if now-lastSnapshot>=1.0 then
+            local update={camera=latest,sun=vec(Lighting:GetSunDirection()),avatar=dynamicSnapshot()}; local newJSON=nil
+            if dirty or now-lastSnapshot>=1.0 then
+                dirty=false
                 lastSnapshot=now
-                local p=latest.p; local parts=snapshot(Vector3.new(p[1],p[2],p[3])); newJSON=HTTP:JSONEncode(parts)
+                local parts=snapshot(); newJSON=HTTP:JSONEncode(parts)
                 if newJSON~=lastPartsJSON then update.parts=parts end
             end
             if wsOpen and ws then
@@ -214,4 +264,4 @@ while task.wait(1/60) do
     end
 end
 ]====])
-print('LUMEN GPU 0.3.1 installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.4 installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')

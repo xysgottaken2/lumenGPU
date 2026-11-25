@@ -50,7 +50,7 @@ func TestBridge(t *testing.T) {
 		t.Fatal("host accepted")
 	}
 	packet := call("GET", "/api/native", "", addr, "").Body.Bytes()
-	if len(packet) != 88+92 || string(packet[:4]) != "LGR3" || binary.LittleEndian.Uint64(packet[4:12]) != 1 || binary.LittleEndian.Uint64(packet[12:20]) != 2 || binary.LittleEndian.Uint32(packet[20:24]) != 1 || math.Float32frombits(binary.LittleEndian.Uint32(packet[24:28])) != 2 {
+	if len(packet) != 88+112 || string(packet[:4]) != "LGR4" || binary.LittleEndian.Uint64(packet[4:12]) != 1 || binary.LittleEndian.Uint64(packet[12:20]) != 2 || binary.LittleEndian.Uint32(packet[20:24]) != 1 || math.Float32frombits(binary.LittleEndian.Uint32(packet[24:28])) != 2 {
 		t.Fatal("native packet mismatch")
 	}
 	if call("GET", "/api/native", "", addr, "https://elsewhere.test").Code != 403 {
