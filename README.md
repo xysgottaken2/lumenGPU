@@ -1,5 +1,3 @@
-# LUMEN GPU 0.3 — Native DXR
+# LUMEN GPU 0.3.1 — lighting regression hotfix
 
-[Setup and limitations](README.txt) | [Windows builds](../../actions)
-
-Studio WebSocket (HTTP fallback), stable 16k-part capacity, dielectric glass, GGX-inspired glossy reflections, actual Dear ImGui (F1), configurable GI/lighting/ray distance/camera. Reinstall matching Lua and replace all files. F2 captures game controls, Esc releases them. Local Studio only.
+Excludes unsupported Terrain from box export, dynamically suppresses opaque camera-enclosing proxy boxes, adds direct sun and sky visibility debug views. F3 cycles views 0–5, or select them in Dear ImGui. Title reports skipped proxies. Install matching Lua and renderer. [Setup](README.txt) | [Windows builds](../../actions)

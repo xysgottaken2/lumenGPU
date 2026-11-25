@@ -156,10 +156,8 @@ local function numeric(a,default,lo,hi) if type(a)~='number' or a~=a then return
 local function snapshot(pos)
     local items={}
     for _,obj in workspace:GetDescendants() do
-        if obj:IsA('BasePart') and (obj.Transparency<.95 or obj.Material==Enum.Material.Glass) and obj.Size.Magnitude>0 and obj:GetAttribute('PathIgnore')~=true and not (owner and owner.Character and obj:IsDescendantOf(owner.Character)) then
-            local localPos=obj.CFrame:PointToObjectSpace(pos);local half=obj.Size*.5
-            -- A mesh approximated as a box can incorrectly enclose the entire camera.
-            if obj:IsA('MeshPart') and math.abs(localPos.X)<half.X and math.abs(localPos.Y)<half.Y and math.abs(localPos.Z)<half.Z then continue end
+        if obj:IsA('BasePart') and not obj:IsA('Terrain') and (obj.Transparency<.95 or obj.Material==Enum.Material.Glass) and obj.Size.Magnitude>0 and obj:GetAttribute('PathIgnore')~=true and not (owner and owner.Character and obj:IsDescendantOf(owner.Character)) then
+            -- Native renderer filters camera-containing opaque boxes dynamically.
             local c=obj.CFrame; local size=obj.Size; local color=obj.Color
             local transmission=numeric(obj:GetAttribute('PathTransmission'),obj.Material==Enum.Material.Glass and .98 or obj.Transparency,0,1)
             local ior=numeric(obj:GetAttribute('PathIOR'),obj.Material==Enum.Material.Glass and 1.5 or 1.33,1,2.5)
@@ -216,4 +214,4 @@ while task.wait(1/60) do
     end
 end
 ]====])
-print('LUMEN GPU 0.3 installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.3.1 installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')

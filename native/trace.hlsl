@@ -31,7 +31,7 @@ float3 path(float3 o,float3 d,inout uint seed) {
  for(uint i=0;i<=uint(options.x);++i) {
   RayQuery<RAY_FLAG_FORCE_OPAQUE> q;
   q.TraceRayInline(scene,RAY_FLAG_NONE,255,ray(o,d,quality.x)); while(q.Proceed()) {}
-  if(q.CommittedStatus()!=COMMITTED_TRIANGLE_HIT) { L+=beta*sky(d); break; }
+  if(q.CommittedStatus()!=COMMITTED_TRIANGLE_HIT) { if(options.w>=4)return float3(1,1,1);L+=beta*sky(d); break; }
   Material m=mats[q.CommittedInstanceID()];
   uint face=q.CommittedPrimitiveIndex()/2;
   float3 n=face<2?m.ax.xyz:(face<4?m.ay.xyz:m.az.xyz);
@@ -41,6 +41,8 @@ float3 path(float3 o,float3 d,inout uint seed) {
   float3 c=pow(saturate(m.colorMetal.xyz),2.2); float metal=saturate(m.colorMetal.w), rough=saturate(m.roughEmit.x);
   if(options.w==1) return c;
   if(options.w==2) return n*.5+.5;
+  if(options.w==4) {float v=saturate(dot(n,sun.xyz));return (v>0 && !blocked(p+n*.003,sun.xyz))?float3(v,v,v):float3(0,0,0);}
+  if(options.w==5) {float v=blocked(p+n*.003,float3(0,1,0))?0:1;return float3(v,v,v);}
   // Small diffuse ambient floor for this prototype; not physically exact GI.
   float trans=saturate(m.roughEmit.z)*switches.z;
   if(i==0) L+=c*(1-metal)*(1-trans)*quality.w;

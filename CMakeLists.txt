@@ -25,3 +25,9 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/trace.cso"
 add_custom_target(LumenShader ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/trace.cso")
 add_dependencies(LumenGPU LumenShader)
 add_custom_command(TARGET LumenGPU POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_BINARY_DIR}/trace.cso" "$<TARGET_FILE_DIR:LumenGPU>/trace.cso")
+
+add_executable(LumenProtocolTest tests/protocol_test.cpp)
+if(MSVC)
+ target_compile_options(LumenProtocolTest PRIVATE /UNDEBUG)
+endif()
+add_custom_command(TARGET LumenProtocolTest POST_BUILD COMMAND "$<TARGET_FILE:LumenProtocolTest>" "${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol_fixture.bin" VERBATIM)

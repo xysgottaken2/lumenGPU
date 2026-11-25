@@ -8,6 +8,22 @@ struct V { float x,y,z; float operator[](int i) const { return i==0?x:i==1?y:z; 
 struct Part { V p,r,u,b,s,c; float metal,rough,emit,transmission=0,ior=1.5f; };
 struct Scene { uint64_t revision=0,seq=0; V p,r,u,f; float fov; V sun; std::vector<Part> parts; };
 static_assert(sizeof(V)==12 && sizeof(Part)==92);
+// A box proxy can enclose the camera even when its source mesh does not.
+// Keep transmissive volumes, since the camera can legitimately be inside glass.
+inline bool enclosingOpaque(const Part& p,V eye) {
+ if(p.transmission>=.5f)return false;
+ V d{eye.x-p.p.x,eye.y-p.p.y,eye.z-p.p.z};
+ auto dot=[&](V v){return d.x*v.x+d.y*v.y+d.z*v.z;};
+ return std::fabs(dot(p.r))<p.s.x*.5f-.001f &&
+        std::fabs(dot(p.u))<p.s.y*.5f-.001f &&
+        std::fabs(dot(p.b))<p.s.z*.5f-.001f;
+}
+inline uint64_t enclosingSignature(const Scene& s,bool glassEnabled) {
+ uint64_t sig=1469598103934665603ull;
+ for(size_t i=0;i<s.parts.size();++i){Part p=s.parts[i];if(!glassEnabled)p.transmission=0;
+ if(enclosingOpaque(p,s.p)){sig^=uint64_t(i)+1;sig*=1099511628211ull;}}
+ return sig;
+}
 inline Scene parse(const std::vector<unsigned char>& a) {
  if(a.size()<88||memcmp(a.data(),"LGR3",4)) throw std::runtime_error("Invalid bridge header");
  size_t at=4; auto read=[&](auto& v){if(at+sizeof(v)>a.size())throw std::runtime_error("Truncated bridge packet"); memcpy(&v,a.data()+at,sizeof(v));at+=sizeof(v);};
