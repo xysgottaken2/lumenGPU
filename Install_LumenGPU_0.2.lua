@@ -477,14 +477,9 @@ task.spawn(function()
      -- Compatibility fallback retains geometry when both sockets are unavailable.
      lastHTTP=now
      local update={camera=latest,sun=vec(Lighting:GetSunDirection())}
-     local w,a=nil,nil
-     if not geometryOpen then
-      if latestWorld and lastPartsJSON~=worldSerial then update.parts=latestWorld;w=worldSerial end
-      if sentAvatar~=avatarSerial then update.avatar=latestAvatar;a=avatarSerial end
-     end
+     -- Geometry fallback is owned by the independent geometry task.
      local res=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/update-controls',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode(update)})
      if not res.Success then error('HTTP '..res.StatusCode) end
-     if w then lastPartsJSON=w end;if a then sentAvatar=a end
      if owner then local ctrl=HTTP:JSONDecode(res.Body);ctrl.transport='HTTP';remote:FireClient(owner,'input',ctrl) end
     end
    end)
@@ -493,12 +488,24 @@ task.spawn(function()
  end
 end)
 local lastGeom=0
+local lastGeomHTTP=-100
 while task.wait(1/60) do
  if owner and latest then
   local ok,err=pcall(function()
    connectGeometry()
-   if not geometryOpen then return end
    local now=os.clock()
+   if not geometryOpen then
+    if now-lastGeomHTTP<1 then return end
+    local update={camera=latest,sun=vec(Lighting:GetSunDirection())};local w,a=nil,nil
+    if latestWorld and lastPartsJSON~=worldSerial then update.parts=latestWorld;w=worldSerial end
+    if sentAvatar~=avatarSerial then update.avatar=latestAvatar;a=avatarSerial end
+    if not w and not a then return end
+    lastGeomHTTP=now
+    local res=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/geometry-update',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode(update)})
+    if not res.Success then error('Geometry HTTP '..res.StatusCode) end
+    if w then lastPartsJSON=w end;if a then sentAvatar=a end
+    return
+   end
    if geometryPending then if now-geometryPending.at>2 then closeGeometry() end;return end
    local update={camera=latest,sun=vec(Lighting:GetSunDirection())};local w,a=nil,nil
    if latestWorld and lastPartsJSON~=worldSerial then update.parts=latestWorld;w=worldSerial end

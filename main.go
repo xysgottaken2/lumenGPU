@@ -179,6 +179,11 @@ func (b *Bridge) handler() http.Handler {
 	}
  mux.HandleFunc("/api/update",updateHandler)
  mux.HandleFunc("/api/update-controls",updateHandler)
+ mux.HandleFunc("/api/geometry-update",func(w http.ResponseWriter,r *http.Request){
+  if r.Method!="POST"||r.Header.Get("Origin")!=""{http.Error(w,"local geometry POST only",403);return}
+  var u Update;d:=json.NewDecoder(http.MaxBytesReader(w,r.Body,32<<20));if d.Decode(&u)!=nil||d.Decode(new(any))!=io.EOF||!valid(u){http.Error(w,"invalid geometry update",400);return}
+  b.applyMode(u,false,true);w.WriteHeader(204)
+ })
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Host != addr && r.Host != "localhost:8765" {
 			http.Error(w, "loopback host only", 403)
