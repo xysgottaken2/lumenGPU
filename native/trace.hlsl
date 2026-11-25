@@ -1,6 +1,7 @@
 RaytracingAccelerationStructure scene : register(t0);
 struct Material {float4 colorMetal,roughEmit,ax,ay,az,scaleSpec,emitColor;};
 StructuredBuffer<Material> mats : register(t1);
+StructuredBuffer<float3> meshNormals : register(t2);
 RWStructuredBuffer<float4> history : register(u0);
 RWTexture2D<float4> output : register(u1);
 RWStructuredBuffer<float4> guides : register(u2);
@@ -41,7 +42,8 @@ float3 path(float3 o,float3 d,inout uint seed,out float4 guide,out float4 alb){
   Material m=mats[q.CommittedInstanceID()];uint primitive=q.CommittedPrimitiveIndex();uint shape=uint(m.ax.w);
   float3 localP=q.CommittedObjectRayOrigin()+q.CommittedObjectRayDirection()*q.CommittedRayT();
   float3 ln;
-  if(shape==1)ln=normalize(localP);
+  if(shape==3)ln=meshNormals[uint(m.ay.w)+primitive];
+  else if(shape==1)ln=normalize(localP);
   else if(shape==2){uint face=primitive%4;if(face==2)ln=float3(-1,0,0);else if(face==3)ln=float3(1,0,0);else ln=normalize(float3(0,localP.y,localP.z));}
   else {uint face=primitive/2;ln=face<2?float3(1,0,0):face<4?float3(0,1,0):float3(0,0,1);if(face%2==1)ln=-ln;}
   float3 invN=ln/max(m.scaleSpec.xyz,.0001);float3 gn=normalize(m.ax.xyz*invN.x+m.ay.xyz*invN.y+m.az.xyz*invN.z);

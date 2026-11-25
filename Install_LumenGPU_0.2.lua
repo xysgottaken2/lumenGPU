@@ -68,6 +68,88 @@ remote.OnClientEvent:Connect(function(kind,c)
     local hum=player.Character and player.Character:FindFirstChildOfClass('Humanoid'); if hum and c.jump then hum.Jump=true end
 end)
 local function vec(v) return {v.X,v.Y,v.Z} end
+-- Cache readable asset geometry once. Asset loads and uploads run outside Heartbeat.
+local Assets=game:GetService('AssetService')
+local meshCache,meshQueue,usedMeshIds={},{},{}
+local meshRandom=Random.new()
+local meshReadyVersion=0
+local meshCount=0
+local function meshEntry(obj)
+    local content,key,special
+    if obj:IsA('MeshPart') then
+        content=obj.MeshContent
+        key=obj.MeshId~='' and obj.MeshId or obj
+    else
+        special=obj:FindFirstChildOfClass('SpecialMesh')
+        if not special or special.MeshType~=Enum.MeshType.FileMesh or special.MeshId=='' then return nil end
+        key=special.MeshId;content=Content.fromUri(key)
+    end
+    local entry=meshCache[key]
+    if not entry and meshCount<256 then
+        local id
+        repeat id=meshRandom:NextInteger(3,16777215) until not usedMeshIds[id]
+        usedMeshIds[id]=true;meshCount+=1
+        entry={id=id,key=key,content=content,state='queued'}
+        meshCache[key]=entry;meshQueue[#meshQueue+1]=entry
+    end
+    return entry,special
+end
+local function extractMesh(entry)
+    local editable=Assets:CreateEditableMeshAsync(entry.content,{FixedSize=true})
+    if not editable then error('EditableMesh allocation failed') end
+    local ok,verts,size=pcall(function()
+        local faces=editable:GetFaces()
+        if #faces==0 or #faces>20000 then error('mesh exceeds 20000 triangles or is empty') end
+        local dimensions=editable:GetSize()
+        local scale=Vector3.new(math.max(dimensions.X,.0001),math.max(dimensions.Y,.0001),math.max(dimensions.Z,.0001))
+        local rows={}
+        for i,face in faces do
+            local ids=editable:GetFaceVertices(face)
+            if #ids==3 then
+                for _,id in ids do local v=editable:GetPosition(id)/scale;rows[#rows+1]=vec(v) end
+            end
+            if i%128==0 then task.wait() end
+        end
+        return rows,scale
+    end)
+    editable:Destroy()
+    if not ok then error(verts) end
+    if #verts==0 then error('no triangle vertices') end
+    entry.vertices=verts;entry.size=size
+end
+remote.OnClientEvent:Connect(function(kind,id,success)
+    if kind~='meshAck' then return end
+    for _,e in meshCache do
+        if e.id==id and e.state=='sending' then
+            if success then e.state='ready';meshReadyVersion+=1;print('[LumenGPU] Mesh ready '..id..' ('..#e.vertices/3..' triangles)');e.vertices=nil
+            else e.state='failed';e.vertices=nil;warn('[LumenGPU] Mesh upload rejected '..id..'; using box fallback') end
+            break
+        end
+    end
+end)
+task.spawn(function()
+    while true do
+        if active and #meshQueue>0 then
+            local e=table.remove(meshQueue,1)
+            local ok,err=pcall(extractMesh,e)
+            if ok then
+                -- Small paced chunks; server uploads via a separate request.
+                while not active do task.wait(.25) end
+                e.state='sending';remote:FireServer('meshBegin',e.id,#e.vertices)
+                for first=1,#e.vertices,384 do
+                    if not active then break end
+                    local rows={};for i=first,math.min(first+383,#e.vertices) do rows[#rows+1]=e.vertices[i] end
+                    remote:FireServer('meshChunk',e.id,rows);task.wait()
+                end
+                if active then remote:FireServer('meshEnd',e.id) end
+                local deadline=os.clock()+30
+                while active and e.state=='sending' and os.clock()<deadline do task.wait(.1) end
+                if e.state=='sending' then e.state='failed';e.vertices=nil;warn('[LumenGPU] Mesh upload interrupted; fallback') end
+            else e.state='failed';warn('[LumenGPU] Mesh unavailable: '..tostring(e.key)..' / '..tostring(err)..'; using box fallback') end
+            task.wait(.25)
+        else task.wait(.15) end
+    end
+end)
 local function materialPart(obj)
     local function num(k,v,lo,hi)
         local x=obj:GetAttribute(k);if type(x)~='number' or x~=x then return v end;return math.clamp(x,lo,hi)
@@ -79,9 +161,19 @@ local function materialPart(obj)
     if mat~=Enum.Material.Glass then local r=math.clamp(obj.Reflectance,0,1);rough=rough+(.045-rough)*r;metal=math.max(metal,r) end
     local color=obj:GetAttribute('PathBaseColor');if typeof(color)~='Color3' then color=obj.Color end
     local ec=obj:GetAttribute('PathEmissionColor');if typeof(ec)~='Color3' then ec=color end
-    local c=obj.CFrame;local shape=0
+    local c=obj.CFrame;local size=obj.Size;local shape=0
     if obj:IsA('Part') then if obj.Shape==Enum.PartType.Ball then shape=1 elseif obj.Shape==Enum.PartType.Cylinder then shape=2 end end
-    return {p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(obj.Size),c={color.R,color.G,color.B},metal=num('PathMetallic',metal,0,1),rough=num('PathRoughness',rough,.025,1),emit=num('PathEmission',(obj:GetAttribute('PathEmissive')==true or mat==Enum.Material.Neon) and 4 or 0,0,50),transmission=num('PathTransmission',mat==Enum.Material.Glass and 1 or obj.Transparency,0,1),ior=num('PathIOR',1.5,1.001,3),shape=shape,specular=num('PathSpecular',1,0,1),emissionColor={ec.R,ec.G,ec.B}}
+    local e,special=meshEntry(obj)
+    if e and e.state=='ready' then
+        shape=e.id
+        if special then
+            c=c*CFrame.new(special.Offset);size=e.size*special.Scale
+        elseif obj:IsA('MeshPart') then
+            local ms=obj.MeshSize;size=Vector3.new(size.X*e.size.X/math.max(ms.X,.0001),size.Y*e.size.Y/math.max(ms.Y,.0001),size.Z*e.size.Z/math.max(ms.Z,.0001))
+        end
+        size=Vector3.new(math.max(size.X,.0001),math.max(size.Y,.0001),math.max(size.Z,.0001))
+    end
+    return {p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(size),c={color.R,color.G,color.B},metal=num('PathMetallic',metal,0,1),rough=num('PathRoughness',rough,.025,1),emit=num('PathEmission',(obj:GetAttribute('PathEmissive')==true or mat==Enum.Material.Neon) and 4 or 0,0,50),transmission=num('PathTransmission',mat==Enum.Material.Glass and 1 or obj.Transparency,0,1),ior=num('PathIOR',1.5,1.001,3),shape=shape,specular=num('PathSpecular',1,0,1),emissionColor={ec.R,ec.G,ec.B}}
 end
 local function avatarSnapshot()
     local list={};local char=player.Character;if not char then return list end
@@ -99,6 +191,7 @@ local dirty=true
 local serial=0
 local lastWorldJSON=nil
 local lastScan=-100
+local capturedMeshVersion=-1
 local fastParts={}
 local captureGeneration=0
 local function invalidateCapture()
@@ -135,6 +228,7 @@ player.CharacterRemoving:Connect(function() dirty=true end)
 -- Static snapshots are built outside the camera Heartbeat and paced over frames.
 local function refreshWorld()
     local generation=captureGeneration
+    capturedMeshVersion=meshReadyVersion
     local now=os.clock()
     if now-lastScan>=5 then
         lastScan=now
@@ -187,7 +281,7 @@ local function refreshWorld()
 end
 task.spawn(function()
     while true do
-        if active and (dirty or lastWorldJSON==nil or os.clock()-lastScan>=5) then
+        if active and (dirty or capturedMeshVersion~=meshReadyVersion or lastWorldJSON==nil or os.clock()-lastScan>=5) then
             local ok,err=pcall(refreshWorld)
             if not ok then dirty=true;warn('[LumenGPU] World capture: '..tostring(err)) end
         end
@@ -272,6 +366,8 @@ local avatarSerial=0;local sentAvatar=-1
 local latestWorld=nil
 local worldSerial=0
 local pending=nil
+local pendingMesh=nil
+local lastMeshUpload=-100
 local lastSnapshot=-100
 local lastPartsJSON=nil
 local ws=nil;local wsOpen=false;local retryAt=0;local wsGeneration=0
@@ -309,6 +405,21 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar)
         if not owner then owner=player; latest=nil; latestAvatar={};avatarSerial=0;sentAvatar=-1; latestWorld=nil;worldSerial=0;pending=nil;lastSnapshot=-100; lastPartsJSON=nil; print('[LumenGPU] Local bridge started') end
         remote:FireClient(player,'status','Waiting for HTTP')
     elseif cmd=='stop' and owner==player then owner=nil; latest=nil;pending=nil;closeWS()
+    elseif cmd=='meshBegin' and owner==player then
+        if type(data)=='number' and data%1==0 and data>=3 and data<=16777215 and type(avatar)=='number' and avatar%3==0 and avatar>=3 and avatar<=60000 then pendingMesh={id=data,count=avatar,rows={}} end
+    elseif cmd=='meshChunk' and owner==player and pendingMesh and pendingMesh.id==data then
+        if type(avatar)~='table' or #avatar>384 or #pendingMesh.rows+#avatar>pendingMesh.count then pendingMesh=nil else for _,v in avatar do pendingMesh.rows[#pendingMesh.rows+1]=v end end
+    elseif cmd=='meshEnd' and owner==player and pendingMesh and pendingMesh.id==data then
+        local batch=pendingMesh;pendingMesh=nil
+        if #batch.rows~=batch.count then remote:FireClient(player,'meshAck',data,false);return end
+        task.spawn(function()
+            -- One asset at a time; pace requests under HTTP limits.
+            local waitFor=math.max(0,2-(os.clock()-lastMeshUpload));if waitFor>0 then task.wait(waitFor) end
+            lastMeshUpload=os.clock()
+            local ok,res=pcall(function() return HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/mesh',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode({id=batch.id,vertices=batch.rows})}) end)
+            if owner==player then remote:FireClient(player,'meshAck',batch.id,ok and res.Success) end
+            if not ok or not res.Success then warn('[LumenGPU] Mesh HTTP upload failed: '..tostring(ok and res.StatusCode or res)) end
+        end)
     elseif cmd=='worldBegin' and owner==player then
         if type(data)=='number' and data>worldSerial and type(avatar)=='number' and avatar>=0 and avatar<=15360 and avatar%1==0 then pending={serial=data,count=avatar,rows={}} end
     elseif cmd=='worldChunk' and owner==player and pending and data==pending.serial then
@@ -360,4 +471,4 @@ while task.wait(1/60) do
     end
 end
 ]====])
-print('LUMEN GPU 0.4 low-latency scene-sync hotfix installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.5 mesh support installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')

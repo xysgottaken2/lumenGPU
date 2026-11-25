@@ -24,6 +24,20 @@ inline uint64_t enclosingSignature(const Scene& s,bool glassEnabled) {
  if(enclosingOpaque(p,s.p)){sig^=uint64_t(i)+1;sig*=1099511628211ull;}}
  return sig;
 }
+inline std::vector<V> parseMesh(const std::vector<unsigned char>& data){
+ if(data.size()<8||memcmp(data.data(),"LGM1",4))throw std::runtime_error("Invalid mesh header");
+ uint32_t count=0;memcpy(&count,data.data()+4,4);
+ if(count<3||count>60000||count%3||data.size()!=8+size_t(count)*12)throw std::runtime_error("Invalid mesh length");
+ std::vector<V> v(count);memcpy(v.data(),data.data()+8,count*12);
+ for(auto p:v)for(int i=0;i<3;++i)if(!std::isfinite(p[i])||std::fabs(p[i])>100)throw std::runtime_error("Invalid mesh vertex");
+ return v;
+}
+inline V triangleNormal(V a,V b,V c){
+ V e{b.x-a.x,b.y-a.y,b.z-a.z},f{c.x-a.x,c.y-a.y,c.z-a.z};
+ V n{e.y*f.z-e.z*f.y,e.z*f.x-e.x*f.z,e.x*f.y-e.y*f.x};
+ float len=std::sqrt(n.x*n.x+n.y*n.y+n.z*n.z);
+ return len>1e-12f?V{n.x/len,n.y/len,n.z/len}:V{0,1,0};
+}
 inline Scene parse(const std::vector<unsigned char>& a) {
  if(a.size()<88||memcmp(a.data(),"LGR4",4)) throw std::runtime_error("Invalid bridge header");
  size_t at=4; auto read=[&](auto& v){if(at+sizeof(v)>a.size())throw std::runtime_error("Truncated bridge packet"); memcpy(&v,a.data()+at,sizeof(v));at+=sizeof(v);};

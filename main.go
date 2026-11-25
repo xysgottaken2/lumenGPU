@@ -72,6 +72,8 @@ type Bridge struct {
  controlAt time.Time
  worldParts []Part
  avatarParts []Part
+ meshes map[uint32][]V
+ meshVertices int
 }
 
 func finite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) && math.Abs(x) < 1e7 }
@@ -97,7 +99,7 @@ func valid(u Update) bool {
 					return false
 				}
 			}
-			if p.Metal < 0 || p.Metal > 1 || p.Rough < 0 || p.Rough > 1 || p.Emit < 0 || p.Emit > 50 || p.Transmission<0 || p.Transmission>1 || (p.IOR!=0 && (p.IOR<1 || p.IOR>3)) || p.Shape<0 || p.Shape>2 || p.Shape!=math.Trunc(p.Shape) || p.Specular<0 || p.Specular>1 {
+			if p.Metal < 0 || p.Metal > 1 || p.Rough < 0 || p.Rough > 1 || p.Emit < 0 || p.Emit > 50 || p.Transmission<0 || p.Transmission>1 || (p.IOR!=0 && (p.IOR<1 || p.IOR>3)) || p.Shape<0 || p.Shape>16777215 || p.Shape!=math.Trunc(p.Shape) || p.Specular<0 || p.Specular>1 {
 				return false
 			}
 		}
@@ -124,6 +126,7 @@ func (b *Bridge) apply(u Update,wantsControls bool) Control {
 func (b *Bridge) handler() http.Handler {
 	mux := http.NewServeMux()
  mux.HandleFunc("/api/ws",b.stream)
+ mux.HandleFunc("/api/mesh",b.meshHandler)
  mux.HandleFunc("/api/input", func(w http.ResponseWriter,r *http.Request){
   if r.Method!="POST" || r.Header.Get("Origin")!="" {http.Error(w,"native POST only",403);return}
   var c Control; d:=json.NewDecoder(http.MaxBytesReader(w,r.Body,4096)); if d.Decode(&c)!=nil || d.Decode(new(any))!=io.EOF || !finite(c.X)||!finite(c.Z)||!finite(c.DX)||!finite(c.DY)||math.Abs(c.X)>1||math.Abs(c.Z)>1||math.Abs(c.DX)>2000||math.Abs(c.DY)>2000 || !finite(c.Distance)||!finite(c.Sensitivity)||!finite(c.Fov)||c.Distance<0||c.Distance>40||c.Sensitivity<0||c.Sensitivity>5||c.Fov<0||c.Fov>120 {http.Error(w,"invalid input",400);return}
@@ -187,7 +190,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("LUMEN GPU 0.4 | Native bridge at http://" + addr + " | Ctrl+C to stop")
+	fmt.Println("LUMEN GPU 0.5 | Native bridge at http://" + addr + " | Ctrl+C to stop")
 	s := http.Server{Handler: (&Bridge{}).handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
 	log.Fatal(s.Serve(l))
 }
