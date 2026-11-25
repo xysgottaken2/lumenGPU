@@ -18,16 +18,55 @@ if not RunService:IsStudio() then return end
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera')
 local UIS=game:GetService('UserInputService')
 local active=false
+local player=game:GetService('Players').LocalPlayer
+local external=false
+local input={}
+local lastInput=0
+local yaw,pitch=0,0
+local controls=nil
+local oldCameraType=nil
+local function release()
+    if not external then return end
+    external=false; input={}
+    if controls then pcall(function() controls:Enable() end) end
+    local cam=workspace.CurrentCamera; if cam then cam.CameraType=oldCameraType or Enum.CameraType.Custom end
+    local hum=player.Character and player.Character:FindFirstChildOfClass('Humanoid'); if hum then hum:Move(Vector3.zero,false) end
+end
+remote.OnClientEvent:Connect(function(kind,c)
+    if kind~='input' or not active or type(c)~='table' then return end
+    if not c.active then release();return end
+    local cam=workspace.CurrentCamera; if not cam then return end
+    if not external then
+        local look=cam.CFrame.LookVector; yaw=math.atan2(-look.X,-look.Z); pitch=math.asin(math.clamp(look.Y,-1,1))
+        oldCameraType=cam.CameraType; external=true
+        pcall(function() controls=require(player.PlayerScripts:WaitForChild('PlayerModule')):GetControls();controls:Disable() end)
+        cam.CameraType=Enum.CameraType.Scriptable
+    end
+    yaw-=math.clamp(c.dx or 0,-2000,2000)*.0025; pitch=math.clamp(pitch-math.clamp(c.dy or 0,-2000,2000)*.0025,-1.50,1.50)
+    input=c;lastInput=os.clock()
+    local hum=player.Character and player.Character:FindFirstChildOfClass('Humanoid'); if hum and c.jump then hum.Jump=true end
+end)
 local function vec(v) return {v.X,v.Y,v.Z} end
 UIS.InputBegan:Connect(function(i,processed)
     if not processed and i.KeyCode==Enum.KeyCode.P and not UIS:GetFocusedTextBox() then
-        active=not active; remote:FireServer(active and 'start' or 'stop'); print('[LumenGPU] '..(active and 'Streaming on' or 'Streaming off'))
+        active=not active; if not active then release() end; remote:FireServer(active and 'start' or 'stop'); print('[LumenGPU] '..(active and 'Streaming on' or 'Streaming off'))
     end
 end)
 local elapsed=0
-RunService.RenderStepped:Connect(function(dt)
+RunService:BindToRenderStep('LumenGPUExternal',Enum.RenderPriority.Camera.Value+2,function(dt)
     if not active then return end
-    elapsed+=dt; if elapsed<.2 then return end; elapsed=0
+    if external then
+        if os.clock()-lastInput>.65 then release() else
+            local char=player.Character;local head=char and char:FindFirstChild('Head');local hum=char and char:FindFirstChildOfClass('Humanoid');local cam=workspace.CurrentCamera
+            if head and hum and cam then
+                local rot=CFrame.fromOrientation(0,yaw,0);local look=rot*CFrame.Angles(pitch,0,0)
+                local move=rot.RightVector*math.clamp(input.x or 0,-1,1)+rot.LookVector*math.clamp(input.z or 0,-1,1)
+                hum:Move(move.Magnitude>1 and move.Unit or move,false)
+                cam.CFrame=CFrame.new(head.Position)*look;cam.Focus=cam.CFrame*CFrame.new(0,0,-10)
+            end
+        end
+    end
+    elapsed+=dt; if elapsed<.10 then return end; elapsed=0
     local cam=workspace.CurrentCamera; if not cam then return end
     local c=cam.CFrame; remote:FireServer('camera',{p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),f=vec(c.LookVector),fov=cam.FieldOfView})
 end)
@@ -48,7 +87,10 @@ local function numeric(a,default,lo,hi) if type(a)~='number' or a~=a then return
 local function snapshot(pos)
     local items={}
     for _,obj in workspace:GetDescendants() do
-        if obj:IsA('BasePart') and obj.Transparency<.95 and obj.Size.Magnitude>0 then
+        if obj:IsA('BasePart') and obj.Transparency<.95 and obj.Size.Magnitude>0 and obj:GetAttribute('PathIgnore')~=true and not (owner and owner.Character and obj:IsDescendantOf(owner.Character)) then
+            local localPos=obj.CFrame:PointToObjectSpace(pos);local half=obj.Size*.5
+            -- A mesh approximated as a box can incorrectly enclose the entire camera.
+            if math.abs(localPos.X)<half.X and math.abs(localPos.Y)<half.Y and math.abs(localPos.Z)<half.Z then continue end
             local c=obj.CFrame; local size=obj.Size; local color=obj.Color
             local distance=(c.Position-pos).Magnitude-math.max(size.X,size.Y,size.Z)*.5
             local metal=numeric(obj:GetAttribute('PathMetallic'),obj.Reflectance,0,1)
@@ -69,21 +111,22 @@ remote.OnServerEvent:Connect(function(player,cmd,data)
 end)
 Players.PlayerRemoving:Connect(function(p) if p==owner then owner=nil; latest=nil end end)
 local lastError=-100
-while task.wait(.2) do
+while task.wait(.15) do
     if owner and latest then
         local ok,err=pcall(function()
             local now=os.clock(); local update={camera=latest,sun=vec(Lighting:GetSunDirection())}; local newJSON=nil
-            if now-lastSnapshot>=1 then
+            if now-lastSnapshot>=.65 then
                 lastSnapshot=now
                 local p=latest.p; local parts=snapshot(Vector3.new(p[1],p[2],p[3])); newJSON=HTTP:JSONEncode(parts)
                 if newJSON~=lastPartsJSON then update.parts=parts end
             end
-            local result=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/update',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode(update)})
+            local result=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/update?controls=1',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode(update)})
             if not result.Success then error('HTTP '..result.StatusCode..' '..result.Body) end
+            if owner then local ctrl=HTTP:JSONDecode(result.Body);remote:FireClient(owner,'input',ctrl) end
             if newJSON then lastPartsJSON=newJSON end
         end)
         if not ok and os.clock()-lastError>5 then lastError=os.clock(); warn('[LumenGPU] '..tostring(err)..' | Start EXE, enable HTTP Requests, use local Studio Play.') end
     end
 end
 ]====])
-print('LUMEN GPU 0.2 installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.2.1 installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')

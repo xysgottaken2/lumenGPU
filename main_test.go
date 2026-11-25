@@ -56,7 +56,13 @@ func TestBridge(t *testing.T) {
 	if call("GET", "/api/native", "", addr, "https://elsewhere.test").Code != 403 {
 		t.Fatal("origin accepted")
 	}
-	if call("GET", "/", "", addr, "").Code != 404 {
+	if call("POST","/api/input",`{"active":true,"x":1,"z":-1,"dx":3,"dy":4,"jump":true}`,addr,"").Code!=204 {t.Fatal("control post failed")}
+ if call("POST","/api/input",`{"active":true,"x":2}`,addr,"").Code!=400 {t.Fatal("invalid control accepted")}
+ w=call("POST","/api/update?controls=1",string(data),addr,"");var ctrl Control;if json.Unmarshal(w.Body.Bytes(),&ctrl)!=nil||!ctrl.Active||ctrl.X!=1||ctrl.DX!=3||!ctrl.Jump {t.Fatal("control response",w.Body.String())}
+ w=call("POST","/api/update?controls=1",string(data),addr,"");if json.Unmarshal(w.Body.Bytes(),&ctrl)!=nil||ctrl.DX!=0||ctrl.Jump {t.Fatal("control not consumed",w.Body.String())}
+ if call("POST","/api/input",`{"active":false}`,addr,"").Code!=204 {t.Fatal("release failed")}
+ w=call("POST","/api/update?controls=1",string(data),addr,"");if json.Unmarshal(w.Body.Bytes(),&ctrl)!=nil||ctrl.Active {t.Fatal("control not released")}
+ if call("GET", "/", "", addr, "").Code != 404 {
 		t.Fatal("unexpected web frontend")
 	}
 }

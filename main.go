@@ -46,9 +46,19 @@ type State struct {
 	Seq      uint64 `json:"seq"`
 	Received int64  `json:"received"`
 }
+type Control struct {
+ Active bool `json:"active"`
+ X float64 `json:"x"`
+ Z float64 `json:"z"`
+ DX float64 `json:"dx"`
+ DY float64 `json:"dy"`
+ Jump bool `json:"jump"`
+}
 type Bridge struct {
-	mu    sync.RWMutex
+	mu sync.RWMutex
 	state State
+ control Control
+ controlAt time.Time
 }
 
 func finite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) && math.Abs(x) < 1e7 }
@@ -82,6 +92,11 @@ func valid(u Update) bool {
 }
 func (b *Bridge) handler() http.Handler {
 	mux := http.NewServeMux()
+ mux.HandleFunc("/api/input", func(w http.ResponseWriter,r *http.Request){
+  if r.Method!="POST" || r.Header.Get("Origin")!="" {http.Error(w,"native POST only",403);return}
+  var c Control; d:=json.NewDecoder(http.MaxBytesReader(w,r.Body,4096)); if d.Decode(&c)!=nil || d.Decode(new(any))!=io.EOF || !finite(c.X)||!finite(c.Z)||!finite(c.DX)||!finite(c.DY)||math.Abs(c.X)>1||math.Abs(c.Z)>1||math.Abs(c.DX)>2000||math.Abs(c.DY)>2000 {http.Error(w,"invalid input",400);return}
+  b.mu.Lock(); if c.Active {if b.control.Active && time.Since(b.controlAt)<500*time.Millisecond {c.DX=math.Max(-2000,math.Min(2000,c.DX+b.control.DX));c.DY=math.Max(-2000,math.Min(2000,c.DY+b.control.DY));c.Jump=c.Jump||b.control.Jump}} else {c=Control{}};b.control=c;b.controlAt=time.Now();b.mu.Unlock();w.WriteHeader(204)
+ })
 	mux.HandleFunc("/api/native", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" || r.Header.Get("Origin") != "" {
 			http.Error(w, "native GET only", 403)
@@ -126,7 +141,10 @@ func (b *Bridge) handler() http.Handler {
 		}
 		b.state.Seq++
 		b.state.Received = time.Now().UnixMilli()
+  c:=Control{}
+  if r.URL.Query().Get("controls")=="1" && time.Since(b.controlAt)<500*time.Millisecond {c=b.control;b.control.DX=0;b.control.DY=0;b.control.Jump=false}
 		b.mu.Unlock()
+  if r.URL.Query().Get("controls")=="1" {w.Header().Set("Content-Type","application/json");json.NewEncoder(w).Encode(c);return}
 		w.WriteHeader(204)
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -144,7 +162,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("LUMEN GPU 0.2 | Native bridge at http://" + addr + " | Ctrl+C to stop")
+	fmt.Println("LUMEN GPU 0.2.1 | Native bridge at http://" + addr + " | Ctrl+C to stop")
 	s := http.Server{Handler: (&Bridge{}).handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
 	log.Fatal(s.Serve(l))
 }

@@ -67,3 +67,5 @@ Limitations:
   Windows execution, Studio connectivity and GPU FPS are unverified.
 - Bridge Go tests passed; protocol parser can be tested on Linux (see tests).
   Native build workflow was not executed here. The source may require build fixes.
+
+V0.2.1 hotfix: reinstall Install_LumenGPU_0.2.lua from this build. F2 in native window captures WASD/mouse/Space and sends local controls to the Studio client (first-person). Esc or loss of focus releases capture; controls expire on disconnect. F3 cycles path-traced / albedo / normals / sky-only; F4/F5 lower/raise exposure. Excludes local avatar and camera-enclosing boxes from exported geometry; PathIgnore=true excludes other problematic parts. Native lighting includes a small approximate ambient floor. Studio polling ~6 Hz, so movement/view latency remains. This patch is not runtime-tested.
