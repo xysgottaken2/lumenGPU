@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.6.1)')
+print('[LumenGPU] Client starting (0.6.2)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -36,14 +36,30 @@ local lastAck=0
 local lastRetry=0
 local status='Waiting for bridge'
 local lastControlLog=0
-local playerModule=player:WaitForChild('PlayerScripts'):FindFirstChild('PlayerModule')
-if playerModule then local ok,m=pcall(require,playerModule); if ok then local success,ctrl=pcall(function() return m:GetControls() end); if success then controls=ctrl end end end
-local function release()
+-- PlayerModule can be inserted after this script starts. Do not block UI startup.
+local function disableDefaultControls()
+    if not controls then return end
+    local ok,err=pcall(function() controls:Disable() end)
+    if not ok then warn('[LumenGPU] Default controls disable failed: '..tostring(err)) end
+end
+task.spawn(function()
+    local scripts=player:WaitForChild('PlayerScripts',15)
+    local module=scripts and scripts:WaitForChild('PlayerModule',15)
+    if not module then warn('[LumenGPU] PlayerModule not found; using priority movement override');return end
+    local ok,result=pcall(function() return require(module):GetControls() end)
+    if ok then
+        controls=result
+        if external then disableDefaultControls() end
+        print('[LumenGPU] PlayerModule controls ready')
+    else warn('[LumenGPU] PlayerModule: '..tostring(result)) end
+end)
+local function release(reason)
     if not external then return end
     external=false; input={}
+    print('[LumenGPU] External controls released: '..tostring(reason or 'stopped'))
     if controls then pcall(function() controls:Enable() end) end
     local cam=workspace.CurrentCamera; if cam then cam.CameraType=oldCameraType or Enum.CameraType.Custom;cam.FieldOfView=oldFov end
-    local hum=player.Character and player.Character:FindFirstChildOfClass('Humanoid'); if hum then hum:Move(Vector3.zero,false) end
+    player:Move(Vector3.zero,false)
 end
 remote.OnClientEvent:Connect(function(kind,c)
     if kind=='status' and active then
@@ -51,7 +67,7 @@ remote.OnClientEvent:Connect(function(kind,c)
     end
     if kind~='input' or not active or type(c)~='table' then return end
     lastAck=os.clock();status=(c.transport or 'HTTP')..(c.active and string.format(' Input [%d,%d]',c.x or 0,c.z or 0) or ' Connected')
-    if not c.active then release();return end
+    if not c.active then release('native input inactive');return end
     lastInput=os.clock()
     if os.clock()-lastControlLog>2 then lastControlLog=os.clock();print('[LumenGPU] Input received: ',c.x,c.z,c.dx,c.dy) end
     local cam=workspace.CurrentCamera; if not cam then return end
@@ -60,7 +76,8 @@ remote.OnClientEvent:Connect(function(kind,c)
         local char=player.Character;local head=char and char:FindFirstChild('Head')
         if head then orbitDistance=math.clamp((cam.CFrame.Position-head.Position).Magnitude,6,20) end
         oldCameraType=cam.CameraType;oldFov=cam.FieldOfView; external=true
-        if controls then pcall(function() controls:Disable() end) end
+        disableDefaultControls()
+        print('[LumenGPU] External controls captured')
         cam.CameraType=Enum.CameraType.Scriptable
     end
     local sensitivity=math.clamp(c.sensitivity or 1,.1,5)*.0025
@@ -320,7 +337,7 @@ end
 local function toggle()
     active=not active
     invalidateCapture()
-    if not active then release() else status='Connecting';lastAck=0;lastRetry=os.clock() end
+    if not active then release('stream stopped') else status='Connecting';lastAck=0;lastRetry=os.clock() end
     remote:FireServer(active and 'start' or 'stop')
     button.Text=active and 'LUMEN GPU: Connecting...' or 'LUMEN GPU: Start (P)'
     print('[LumenGPU] '..(active and 'Streaming on' or 'Streaming off'))
@@ -329,36 +346,50 @@ button.Activated:Connect(toggle)
 UIS.InputBegan:Connect(function(i,processed)
     if i.KeyCode==Enum.KeyCode.P and not UIS:GetFocusedTextBox() then toggle() end
 end)
+-- Input is held state, not an individual key press per network packet.
+-- Override default PlayerModule movement after its Input-priority update.
+local function applyMovement()
+    if not active or not external then return end
+    if os.clock()-lastInput>.65 then release('input timeout');return end
+    local rot=CFrame.fromOrientation(0,yaw,0)
+    local move=rot.RightVector*math.clamp(input.x or 0,-1,1)+rot.LookVector*math.clamp(input.z or 0,-1,1)
+    player:Move(move.Magnitude>1 and move.Unit or move,false)
+end
+local function updateCamera()
+    if not active or not external then return end
+    local char=player.Character;local head=char and char:FindFirstChild('Head');local cam=workspace.CurrentCamera
+    if not head or not cam then return end
+    local rot=CFrame.fromOrientation(0,yaw,0);local look=rot*CFrame.Angles(pitch,0,0)
+    local pivot=head.Position+Vector3.new(0,.5,0)
+    local offset=-look.LookVector*orbitDistance
+    local params=RaycastParams.new();params.FilterType=Enum.RaycastFilterType.Exclude;params.FilterDescendantsInstances={char};params.RespectCanCollide=true
+    local hit=workspace:Raycast(pivot,offset,params)
+    if hit then offset=offset.Unit*math.max(.35,hit.Distance-.35) end
+    cam.CameraType=Enum.CameraType.Scriptable
+    cam.CFrame=CFrame.new(pivot+offset)*look;cam.Focus=CFrame.new(pivot)
+end
+RunService:BindToRenderStep('LumenGPU_ExternalMovement',Enum.RenderPriority.Input.Value+1,applyMovement)
+-- Reassert immediately before simulation as well, so physics sees held input.
+RunService.PreSimulation:Connect(applyMovement)
 local elapsed=0
 local fastElapsed=0
--- Heartbeat continues independently of presentation/render-step scheduling.
-RunService.Heartbeat:Connect(function(dt)
+RunService:BindToRenderStep('LumenGPU_ExternalCamera',Enum.RenderPriority.Camera.Value+1,function(dt)
+    if not active then return end
+    updateCamera()
+    elapsed+=dt;fastElapsed+=dt;if elapsed<1/60 then return end;elapsed=elapsed%(1/60)
+    local cam=workspace.CurrentCamera;if not cam then return end
+    local c=cam.CFrame;local fast=nil
+    if fastElapsed>=1/30 then fastElapsed=fastElapsed%(1/30);fast=fastSnapshot() end
+    remote:FireServer('camera',{p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),f=vec(c.LookVector),fov=cam.FieldOfView},fast)
+end)
+RunService.Heartbeat:Connect(function()
     if not active then return end
     local now=os.clock()
     if now-lastAck>2 and now-lastRetry>2 then lastRetry=now;invalidateCapture();remote:FireServer('start') end
     button.Text='LUMEN GPU: '..(now-lastAck>2 and 'Connecting...' or status)..' (Stop)'
-    if external then
-        if os.clock()-lastInput>.65 then release() else
-            local char=player.Character;local head=char and char:FindFirstChild('Head');local hum=char and char:FindFirstChildOfClass('Humanoid');local cam=workspace.CurrentCamera
-            if head and hum and cam then
-                local rot=CFrame.fromOrientation(0,yaw,0);local look=rot*CFrame.Angles(pitch,0,0)
-                local move=rot.RightVector*math.clamp(input.x or 0,-1,1)+rot.LookVector*math.clamp(input.z or 0,-1,1)
-                hum:Move(move.Magnitude>1 and move.Unit or move,false)
-                local pivot=head.Position+Vector3.new(0,.5,0)
-                local offset=-look.LookVector*orbitDistance
-                local params=RaycastParams.new();params.FilterType=Enum.RaycastFilterType.Exclude;params.FilterDescendantsInstances={char};params.RespectCanCollide=true
-                local hit=workspace:Raycast(pivot,offset,params)
-                if hit then offset=offset.Unit*math.max(.35,hit.Distance-.35) end
-                cam.CFrame=CFrame.new(pivot+offset)*look;cam.Focus=CFrame.new(pivot)
-            end
-        end
-    end
-    elapsed+=dt;fastElapsed+=dt; if elapsed<1/60 then return end; elapsed=elapsed%(1/60)
-    local cam=workspace.CurrentCamera; if not cam then return end
-    local c=cam.CFrame
-    local fast=nil
-    if fastElapsed>=1/30 then fastElapsed=fastElapsed%(1/30);fast=fastSnapshot() end
-    remote:FireServer('camera',{p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),f=vec(c.LookVector),fov=cam.FieldOfView},fast)
+end)
+player.CharacterAdded:Connect(function()
+    if external then disableDefaultControls() end
 end)
 print('[LumenGPU] Press P to toggle local scene streaming')
 ]====])
@@ -528,4 +559,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.6.1 Studio startup hotfix installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.6.2 continuous movement hotfix installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
