@@ -99,6 +99,11 @@ local dirty=true
 local serial=0
 local lastWorldJSON=nil
 local lastScan=-100
+local fastParts={}
+local captureGeneration=0
+local function invalidateCapture()
+    captureGeneration+=1;lastWorldJSON=nil;dirty=true
+end
 local function eligible(obj)
     return obj:IsDescendantOf(workspace) and obj:IsA('BasePart') and not obj:IsA('Terrain') and obj.Name~='HumanoidRootPart' and (obj.Transparency<.95 or obj.Material==Enum.Material.Glass) and obj.Size.Magnitude>0 and obj:GetAttribute('PathIgnore')~=true and not (player.Character and obj:IsDescendantOf(player.Character))
 end
@@ -110,6 +115,10 @@ local function track(obj)
     end
     tracked[obj][1]=obj:GetPropertyChangedSignal('CFrame'):Connect(promote)
     tracked[obj][2]=obj:GetPropertyChangedSignal('Anchored'):Connect(promote)
+    tracked[obj][3]=obj.Changed:Connect(function(prop)
+        if not dynamic[obj] and (prop=='Size' or prop=='Color' or prop=='Material' or prop=='Reflectance' or prop=='Transparency' or prop=='Shape' or prop=='Name') then dirty=true end
+    end)
+    tracked[obj][4]=obj.AttributeChanged:Connect(function() if not dynamic[obj] then dirty=true end end)
     if not obj.Anchored then dynamic[obj]=true end
     dirty=true
 end
@@ -123,54 +132,92 @@ workspace.DescendantRemoving:Connect(function(obj)
 end)
 player.CharacterAdded:Connect(function() dirty=true end)
 player.CharacterRemoving:Connect(function() dirty=true end)
-local function captureWorld(now)
-    local rescan=now-lastScan>=1
-    if rescan then
+-- Static snapshots are built outside the camera Heartbeat and paced over frames.
+local function refreshWorld()
+    local generation=captureGeneration
+    local now=os.clock()
+    if now-lastScan>=5 then
         lastScan=now
-        for _,obj in workspace:GetDescendants() do track(obj) end
+        local n=0
+        for _,obj in workspace:GetDescendants() do
+            track(obj);n+=1
+            if n%128==0 then task.wait();if not active or generation~=captureGeneration then return end end
+        end
     end
-    local static,fast={},{}
-    local compact,seen={},{}
-    local rebuild=dirty or rescan or lastWorldJSON==nil
+    dirty=false
+    local static,fast,compact,seen={},{},{},{}
     local overflow=0
-    for _,obj in order do
+    local n=0
+    -- Snapshot the order so add/remove callbacks may safely run while yielding.
+    local source=table.clone(order)
+    for _,obj in source do
         if tracked[obj] and not seen[obj] then
-            seen[obj]=true
-            if rebuild then compact[#compact+1]=obj end
+            seen[obj]=true;compact[#compact+1]=obj
             if eligible(obj) then
-                if dynamic[obj] and #fast<960 then
-                    fast[#fast+1]=materialPart(obj)
-                elseif rebuild then
-                    if #static<15360 then static[#static+1]=materialPart(obj) else overflow+=1 end
-                end
+                if dynamic[obj] and #fast<960 then fast[#fast+1]=obj
+                elseif #static<15360 then static[#static+1]=materialPart(obj)
+                else overflow+=1 end
             end
         end
+        n+=1
+        if n%64==0 then task.wait();if not active or generation~=captureGeneration then return end end
     end
-    if rebuild then
-        order=compact;dirty=false
-        local encoded=HTTP:JSONEncode(static)
-        if encoded~=lastWorldJSON then
-            serial+=1
-            -- Reliable ordered RemoteEvent messages; commit only a complete snapshot.
-            local chunks=math.ceil(#static/128)
-            remote:FireServer('worldBegin',serial,#static)
-            for chunk=1,chunks do
-                local rows={}
-                for i=(chunk-1)*128+1,math.min(chunk*128,#static) do rows[#rows+1]=static[i] end
-                remote:FireServer('worldChunk',serial,rows)
-            end
-            remote:FireServer('worldEnd',serial)
-            lastWorldJSON=encoded
-            print('[LumenGPU] Client world snapshot '..serial..': '..#static..' static parts, '..#fast..' moving parts')
-            if overflow>0 then warn('[LumenGPU] World capacity exceeded; '..overflow..' parts omitted') end
+    if not active or generation~=captureGeneration then return end
+    -- Preserve entries added during this build.
+    for _,obj in order do if tracked[obj] and not seen[obj] then seen[obj]=true;compact[#compact+1]=obj;dirty=true end end
+    order=compact
+    local encoded=HTTP:JSONEncode(static)
+    if encoded~=lastWorldJSON then
+        serial+=1;local id=serial
+        remote:FireServer('worldBegin',id,#static)
+        for first=1,#static,64 do
+            if not active or generation~=captureGeneration then return end
+            local rows={}
+            for i=first,math.min(first+63,#static) do rows[#rows+1]=static[i] end
+            remote:FireServer('worldChunk',id,rows)
+            task.wait()
         end
+        if not active or generation~=captureGeneration then return end
+        remote:FireServer('worldEnd',id)
+        lastWorldJSON=encoded
+        print('[LumenGPU] Client world snapshot '..id..': '..#static..' static parts, '..#fast..' moving parts')
     end
-    for _,part in avatarSnapshot() do if #fast<1024 then fast[#fast+1]=part end end
-    return fast
+    fastParts=fast
+    if overflow>0 then warn('[LumenGPU] World capacity exceeded; '..overflow..' parts omitted') end
+end
+task.spawn(function()
+    while true do
+        if active and (dirty or lastWorldJSON==nil or os.clock()-lastScan>=5) then
+            local ok,err=pcall(refreshWorld)
+            if not ok then dirty=true;warn('[LumenGPU] World capture: '..tostring(err)) end
+        end
+        task.wait(.1)
+    end
+end)
+-- Only traverse moving objects here; the camera loop never scans the world.
+local cachedMoving={}
+task.spawn(function()
+    while true do
+        if active then
+            local rows={}
+            for i,obj in fastParts do
+                if eligible(obj) then rows[#rows+1]=materialPart(obj) end
+                if i%64==0 then task.wait();if not active then break end end
+            end
+            if active then cachedMoving=rows end
+        else cachedMoving={} end
+        task.wait(1/30)
+    end
+end)
+local function fastSnapshot()
+    local rows=avatarSnapshot()
+    for _,part in cachedMoving do if #rows<1024 then rows[#rows+1]=part end end
+    return rows
 end
 local function toggle()
     active=not active
-    if not active then release() else status='Connecting';lastAck=0;lastRetry=os.clock();lastWorldJSON=nil;dirty=true end
+    invalidateCapture()
+    if not active then release() else status='Connecting';lastAck=0;lastRetry=os.clock() end
     remote:FireServer(active and 'start' or 'stop')
     button.Text=active and 'LUMEN GPU: Connecting...' or 'LUMEN GPU: Start (P)'
     print('[LumenGPU] '..(active and 'Streaming on' or 'Streaming off'))
@@ -180,11 +227,12 @@ UIS.InputBegan:Connect(function(i,processed)
     if i.KeyCode==Enum.KeyCode.P and not UIS:GetFocusedTextBox() then toggle() end
 end)
 local elapsed=0
+local fastElapsed=0
 -- Heartbeat continues independently of presentation/render-step scheduling.
 RunService.Heartbeat:Connect(function(dt)
     if not active then return end
     local now=os.clock()
-    if now-lastAck>2 and now-lastRetry>2 then lastRetry=now;lastWorldJSON=nil;dirty=true;remote:FireServer('start') end
+    if now-lastAck>2 and now-lastRetry>2 then lastRetry=now;invalidateCapture();remote:FireServer('start') end
     button.Text='LUMEN GPU: '..(now-lastAck>2 and 'Connecting...' or status)..' (Stop)'
     if external then
         if os.clock()-lastInput>.65 then release() else
@@ -202,9 +250,12 @@ RunService.Heartbeat:Connect(function(dt)
             end
         end
     end
-    elapsed+=dt; if elapsed<1/60 then return end; elapsed=0
+    elapsed+=dt;fastElapsed+=dt; if elapsed<1/60 then return end; elapsed=elapsed%(1/60)
     local cam=workspace.CurrentCamera; if not cam then return end
-    local c=cam.CFrame; remote:FireServer('camera',{p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),f=vec(c.LookVector),fov=cam.FieldOfView},captureWorld(now))
+    local c=cam.CFrame
+    local fast=nil
+    if fastElapsed>=1/30 then fastElapsed=fastElapsed%(1/30);fast=fastSnapshot() end
+    remote:FireServer('camera',{p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),f=vec(c.LookVector),fov=cam.FieldOfView},fast)
 end)
 print('[LumenGPU] Press P to toggle local scene streaming')
 ]====])
@@ -217,14 +268,16 @@ local Players=game:GetService('Players')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera')
 local owner,latest=nil,nil
 local latestAvatar={}
+local avatarSerial=0;local sentAvatar=-1
 local latestWorld=nil
 local worldSerial=0
 local pending=nil
 local lastSnapshot=-100
 local lastPartsJSON=nil
 local ws=nil;local wsOpen=false;local retryAt=0;local wsGeneration=0
+local inflight=nil
 local function closeWS()
-    wsGeneration+=1;local old=ws;ws=nil;wsOpen=false
+    wsGeneration+=1;local old=ws;ws=nil;wsOpen=false;inflight=nil;sentAvatar=-1;lastPartsJSON=nil
     if old then pcall(function() old:Close() end) end
 end
 local function connectWS()
@@ -236,8 +289,14 @@ local function connectWS()
     c.Opened:Connect(function() if generation~=wsGeneration then return end;wsOpen=true;lastSnapshot=-100;lastPartsJSON=nil;print('[LumenGPU] WebSocket open') end)
     c.MessageReceived:Connect(function(msg)
         if generation~=wsGeneration or not owner then return end
+        local packet=inflight;inflight=nil
         local good,ctrl=pcall(function() return HTTP:JSONDecode(msg) end)
-        if good and type(ctrl)=='table' and not ctrl.error then ctrl.transport='WS';remote:FireClient(owner,'input',ctrl) elseif good then lastPartsJSON=nil;warn('[LumenGPU] WebSocket update rejected: '..tostring(ctrl.error));remote:FireClient(owner,'status','Geometry rejected - see Output') end
+        if good and type(ctrl)=='table' and not ctrl.error then
+            if packet then if packet.world then lastPartsJSON=packet.world end;if packet.avatar then sentAvatar=packet.avatar end end
+            ctrl.transport='WS';remote:FireClient(owner,'input',ctrl)
+        else
+            lastPartsJSON=nil;sentAvatar=-1;warn('[LumenGPU] WebSocket update rejected: '..tostring(good and type(ctrl)=='table' and ctrl.error or ctrl));remote:FireClient(owner,'status','Geometry rejected - see Output')
+        end
     end)
     local function failed() if generation==wsGeneration then closeWS();retryAt=os.clock()+5;lastPartsJSON=nil end end
     c.Closed:Connect(failed);c.Error:Connect(function(code,msg) warn('[LumenGPU] WS: '..tostring(code)..' '..tostring(msg));failed() end)
@@ -247,7 +306,7 @@ end
 local function vec(v) return {v.X,v.Y,v.Z} end
 remote.OnServerEvent:Connect(function(player,cmd,data,avatar)
     if cmd=='start' and (not owner or owner==player) then
-        if not owner then owner=player; latest=nil; latestAvatar={}; latestWorld=nil;worldSerial=0;pending=nil;lastSnapshot=-100; lastPartsJSON=nil; print('[LumenGPU] Local bridge started') end
+        if not owner then owner=player; latest=nil; latestAvatar={};avatarSerial=0;sentAvatar=-1; latestWorld=nil;worldSerial=0;pending=nil;lastSnapshot=-100; lastPartsJSON=nil; print('[LumenGPU] Local bridge started') end
         remote:FireClient(player,'status','Waiting for HTTP')
     elseif cmd=='stop' and owner==player then owner=nil; latest=nil;pending=nil;closeWS()
     elseif cmd=='worldBegin' and owner==player then
@@ -257,7 +316,7 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar)
     elseif cmd=='worldEnd' and owner==player and pending and data==pending.serial then
         if #pending.rows==pending.count then latestWorld=pending.rows;worldSerial=pending.serial;print('[LumenGPU] Accepted client world '..worldSerial..': '..#latestWorld..' static parts') end;pending=nil
     elseif cmd=='camera' and owner==player and type(data)=='table' then
-        if type(data.p)=='table' and #data.p==3 and type(data.r)=='table' and #data.r==3 and type(data.u)=='table' and #data.u==3 and type(data.f)=='table' and #data.f==3 and type(data.fov)=='number' then latest=data; if type(avatar)=='table' and #avatar<=1024 then latestAvatar=avatar end end
+        if type(data.p)=='table' and #data.p==3 and type(data.r)=='table' and #data.r==3 and type(data.u)=='table' and #data.u==3 and type(data.f)=='table' and #data.f==3 and type(data.fov)=='number' then latest=data; if type(avatar)=='table' and #avatar<=1024 then latestAvatar=avatar;avatarSerial+=1 end end
     end
 end)
 Players.PlayerRemoving:Connect(function(p) if p==owner then owner=nil; latest=nil;closeWS() end end)
@@ -267,14 +326,21 @@ while task.wait(1/60) do
     if owner and latest then
         local ok,err=pcall(function()
             local now=os.clock();connectWS()
+            -- Never queue old camera packets behind an unacknowledged WebSocket update.
+            if wsOpen and inflight then
+                if now-inflight.at>1 then closeWS();retryAt=now+1 else return end
+            end
             if not wsOpen and now-lastHTTP<.15 then return end
-            local update={camera=latest,sun=vec(Lighting:GetSunDirection()),avatar=latestAvatar}; local newJSON=nil
-            if latestWorld and (lastPartsJSON~=worldSerial or now-lastSnapshot>=5) then
+            local update={camera=latest,sun=vec(Lighting:GetSunDirection())}; local newJSON=nil;local newAvatar=nil
+            if sentAvatar~=avatarSerial then update.avatar=latestAvatar;newAvatar=avatarSerial end
+            if latestWorld and lastPartsJSON~=worldSerial then
                 lastSnapshot=now;newJSON=worldSerial;update.parts=latestWorld
             end
             if wsOpen and ws then
-                ws:Send(HTTP:JSONEncode(update))
-                if newJSON then lastPartsJSON=newJSON end
+                local payload=HTTP:JSONEncode(update)
+                inflight={at=now,world=newJSON,avatar=newAvatar}
+                local sent,err=pcall(function() ws:Send(payload) end)
+                if not sent then closeWS();retryAt=now+1;error(err) end
                 return
             end
             lastHTTP=now
@@ -285,6 +351,7 @@ while task.wait(1/60) do
                 else local ctrl=HTTP:JSONDecode(result.Body);remote:FireClient(owner,'input',ctrl) end
             end
             if newJSON then lastPartsJSON=newJSON end
+            if newAvatar then sentAvatar=newAvatar end
         end)
         if not ok and os.clock()-lastError>2 then
             lastError=os.clock();warn('[LumenGPU] '..tostring(err)..' | Start EXE, enable HTTP Requests, use local Studio Play.')
@@ -293,4 +360,4 @@ while task.wait(1/60) do
     end
 end
 ]====])
-print('LUMEN GPU 0.4 scene-sync hotfix installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.4 low-latency scene-sync hotfix installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
