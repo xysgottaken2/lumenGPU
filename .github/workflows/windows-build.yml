@@ -1,0 +1,29 @@
+name: Build LUMEN GPU Windows x64
+on: [workflow_dispatch, push]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: false
+      - name: Test and build bridge
+        shell: pwsh
+        run: |
+          go test ./...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -trimpath -ldflags '-s -w' -o LumenBridge.exe .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build native renderer and shader
+        shell: pwsh
+        run: ./Build-Windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LumenGPU-0.2-Windows-x64
+          path: dist/
+          if-no-files-found: error
