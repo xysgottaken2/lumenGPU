@@ -3,7 +3,18 @@ on: [workflow_dispatch, push]
 permissions:
   contents: read
 jobs:
+  studio-syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile installer and embedded Roblox scripts
+        run: |
+          curl -fLsS -o /tmp/luau.zip https://github.com/luau-lang/luau/releases/download/0.744/luau-ubuntu.zip
+          unzip -q /tmp/luau.zip -d /tmp/luau
+          python3 tests/check_studio.py /tmp/luau/luau-compile
   build:
+    needs: studio-syntax
     runs-on: windows-2022
     timeout-minutes: 15
     steps:

@@ -15,7 +15,9 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera')
+print('[LumenGPU] Client starting (0.6.1)')
+local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
+assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
 local active=false
 local player=game:GetService('Players').LocalPlayer
@@ -29,6 +31,7 @@ local controls=nil
 local oldCameraType=nil
 local gui=Instance.new('ScreenGui'); gui.Name='LumenGPUConnection';gui.ResetOnSpawn=false;gui.DisplayOrder=100;gui.Parent=player:WaitForChild('PlayerGui')
 local button=Instance.new('TextButton');button.Name='Toggle';button.Size=UDim2.fromOffset(240,34);button.Position=UDim2.new(1,-252,0,12);button.BackgroundColor3=Color3.fromRGB(35,45,57);button.TextColor3=Color3.new(1,1,1);button.TextSize=14;button.Font=Enum.Font.GothamMedium;button.Text='LUMEN GPU: Start (P)';button.Parent=gui
+print('[LumenGPU] Connection UI created')
 local lastAck=0
 local lastRetry=0
 local status='Waiting for bridge'
@@ -121,7 +124,7 @@ remote.OnClientEvent:Connect(function(kind,id,success)
     if kind~='meshAck' then return end
     for _,e in meshCache do
         if e.id==id and e.state=='sending' then
-            if success then e.state='ready';meshReadyVersion+=1;print('[LumenGPU] Mesh ready '..id..' ('..#e.vertices/3..' triangles)');e.vertices=nil
+            if success then e.state='ready';meshReadyVersion+=1;print('[LumenGPU] Mesh ready '..id..' ('..tostring(#e.vertices / 3)..' triangles)');e.vertices=nil
             else e.state='failed';e.vertices=nil;warn('[LumenGPU] Mesh upload rejected '..id..'; using box fallback') end
             break
         end
@@ -215,7 +218,13 @@ local function track(obj)
     if not obj.Anchored then dynamic[obj]=true end
     dirty=true
 end
-for _,obj in workspace:GetDescendants() do track(obj) end
+task.defer(function()
+    for i,obj in workspace:GetDescendants() do
+        local ok,err=pcall(track,obj)
+        if not ok then warn('[LumenGPU] Track: '..tostring(err)) end
+        if i%128==0 then task.wait() end
+    end
+end)
 workspace.DescendantAdded:Connect(track)
 workspace.DescendantRemoving:Connect(function(obj)
     if tracked[obj] then
@@ -519,4 +528,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.6 low-latency transport installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.6.1 Studio startup hotfix installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
