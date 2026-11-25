@@ -25,6 +25,11 @@ local lastInput=0
 local yaw,pitch=0,0
 local controls=nil
 local oldCameraType=nil
+local gui=Instance.new('ScreenGui'); gui.Name='LumenGPUConnection';gui.ResetOnSpawn=false;gui.DisplayOrder=100;gui.Parent=player:WaitForChild('PlayerGui')
+local button=Instance.new('TextButton');button.Name='Toggle';button.Size=UDim2.fromOffset(240,34);button.Position=UDim2.new(1,-252,0,12);button.BackgroundColor3=Color3.fromRGB(35,45,57);button.TextColor3=Color3.new(1,1,1);button.TextSize=14;button.Font=Enum.Font.GothamMedium;button.Text='LUMEN GPU: Start (P)';button.Parent=gui
+local lastAck=0
+local lastRetry=0
+local status='Waiting for bridge'
 local function release()
     if not external then return end
     external=false; input={}
@@ -33,7 +38,11 @@ local function release()
     local hum=player.Character and player.Character:FindFirstChildOfClass('Humanoid'); if hum then hum:Move(Vector3.zero,false) end
 end
 remote.OnClientEvent:Connect(function(kind,c)
+    if kind=='status' and active then
+        status=tostring(c);lastAck=os.clock();return
+    end
     if kind~='input' or not active or type(c)~='table' then return end
+    lastAck=os.clock();status='Connected'
     if not c.active then release();return end
     local cam=workspace.CurrentCamera; if not cam then return end
     if not external then
@@ -47,14 +56,23 @@ remote.OnClientEvent:Connect(function(kind,c)
     local hum=player.Character and player.Character:FindFirstChildOfClass('Humanoid'); if hum and c.jump then hum.Jump=true end
 end)
 local function vec(v) return {v.X,v.Y,v.Z} end
+local function toggle()
+    active=not active
+    if not active then release() else status='Connecting';lastAck=0;lastRetry=os.clock() end
+    remote:FireServer(active and 'start' or 'stop')
+    button.Text=active and 'LUMEN GPU: Connecting...' or 'LUMEN GPU: Start (P)'
+    print('[LumenGPU] '..(active and 'Streaming on' or 'Streaming off'))
+end
+button.Activated:Connect(toggle)
 UIS.InputBegan:Connect(function(i,processed)
-    if not processed and i.KeyCode==Enum.KeyCode.P and not UIS:GetFocusedTextBox() then
-        active=not active; if not active then release() end; remote:FireServer(active and 'start' or 'stop'); print('[LumenGPU] '..(active and 'Streaming on' or 'Streaming off'))
-    end
+    if i.KeyCode==Enum.KeyCode.P and not UIS:GetFocusedTextBox() then toggle() end
 end)
 local elapsed=0
 RunService:BindToRenderStep('LumenGPUExternal',Enum.RenderPriority.Camera.Value+2,function(dt)
     if not active then return end
+    local now=os.clock()
+    if now-lastAck>2 and now-lastRetry>2 then lastRetry=now;remote:FireServer('start') end
+    button.Text='LUMEN GPU: '..(now-lastAck>2 and 'Connecting...' or status)..' (Stop)'
     if external then
         if os.clock()-lastInput>.65 then release() else
             local char=player.Character;local head=char and char:FindFirstChild('Head');local hum=char and char:FindFirstChildOfClass('Humanoid');local cam=workspace.CurrentCamera
@@ -103,7 +121,9 @@ local function snapshot(pos)
     local out={}; for i=1,math.min(1024,#items) do out[i]=items[i].data end; return out
 end
 remote.OnServerEvent:Connect(function(player,cmd,data)
-    if cmd=='start' and not owner then owner=player; latest=nil; lastSnapshot=-100; lastPartsJSON=nil; print('[LumenGPU] Local bridge started')
+    if cmd=='start' and (not owner or owner==player) then
+        if not owner then owner=player; latest=nil; lastSnapshot=-100; lastPartsJSON=nil; print('[LumenGPU] Local bridge started') end
+        remote:FireClient(player,'status','Waiting for HTTP')
     elseif cmd=='stop' and owner==player then owner=nil; latest=nil
     elseif cmd=='camera' and owner==player and type(data)=='table' then
         if type(data.p)=='table' and #data.p==3 and type(data.r)=='table' and #data.r==3 and type(data.u)=='table' and #data.u==3 and type(data.f)=='table' and #data.f==3 and type(data.fov)=='number' then latest=data end
@@ -122,11 +142,17 @@ while task.wait(.15) do
             end
             local result=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/update?controls=1',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode(update)})
             if not result.Success then error('HTTP '..result.StatusCode..' '..result.Body) end
-            if owner then local ctrl=HTTP:JSONDecode(result.Body);remote:FireClient(owner,'input',ctrl) end
+            if owner then
+                if result.StatusCode==204 or result.Body=='' then remote:FireClient(owner,'status','Connected (old bridge)')
+                else local ctrl=HTTP:JSONDecode(result.Body);remote:FireClient(owner,'input',ctrl) end
+            end
             if newJSON then lastPartsJSON=newJSON end
         end)
-        if not ok and os.clock()-lastError>5 then lastError=os.clock(); warn('[LumenGPU] '..tostring(err)..' | Start EXE, enable HTTP Requests, use local Studio Play.') end
+        if not ok and os.clock()-lastError>2 then
+            lastError=os.clock();warn('[LumenGPU] '..tostring(err)..' | Start EXE, enable HTTP Requests, use local Studio Play.')
+            if owner then remote:FireClient(owner,'status','HTTP error - see Output') end
+        end
     end
 end
 ]====])
-print('LUMEN GPU 0.2.1 installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.2.1 connection hotfix installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
