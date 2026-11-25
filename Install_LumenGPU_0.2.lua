@@ -23,6 +23,7 @@ local external=false
 local input={}
 local lastInput=0
 local yaw,pitch=0,0
+local orbitDistance=10
 local controls=nil
 local oldCameraType=nil
 local gui=Instance.new('ScreenGui'); gui.Name='LumenGPUConnection';gui.ResetOnSpawn=false;gui.DisplayOrder=100;gui.Parent=player:WaitForChild('PlayerGui')
@@ -52,15 +53,27 @@ remote.OnClientEvent:Connect(function(kind,c)
     local cam=workspace.CurrentCamera; if not cam then return end
     if not external then
         local look=cam.CFrame.LookVector; yaw=math.atan2(-look.X,-look.Z); pitch=math.asin(math.clamp(look.Y,-1,1))
+        local char=player.Character;local head=char and char:FindFirstChild('Head')
+        if head then orbitDistance=math.clamp((cam.CFrame.Position-head.Position).Magnitude,6,20) end
         oldCameraType=cam.CameraType; external=true
         if controls then pcall(function() controls:Disable() end) end
         cam.CameraType=Enum.CameraType.Scriptable
     end
-    yaw-=math.clamp(c.dx or 0,-2000,2000)*.0025; pitch=math.clamp(pitch-math.clamp(c.dy or 0,-2000,2000)*.0025,-1.50,1.50)
+    yaw-=math.clamp(c.dx or 0,-2000,2000)*.0025; pitch=math.clamp(pitch-math.clamp(c.dy or 0,-2000,2000)*.0025,-1.15,1.15)
     input=c;lastInput=os.clock()
     local hum=player.Character and player.Character:FindFirstChildOfClass('Humanoid'); if hum and c.jump then hum.Jump=true end
 end)
 local function vec(v) return {v.X,v.Y,v.Z} end
+local function avatarSnapshot()
+    local list={};local char=player.Character;if not char then return list end
+    for _,obj in char:GetDescendants() do
+        if obj:IsA('BasePart') and obj.Name~='HumanoidRootPart' and obj.Transparency<.95 and obj:GetAttribute('PathIgnore')~=true and #list<64 then
+            local c=obj.CFrame;local color=obj.Color
+            list[#list+1]={p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(obj.Size),c={color.R,color.G,color.B},metal=math.clamp(obj.Reflectance,0,1),rough=.55,emit=0}
+        end
+    end
+    return list
+end
 local function toggle()
     active=not active
     if not active then release() else status='Connecting';lastAck=0;lastRetry=os.clock() end
@@ -86,13 +99,18 @@ RunService.Heartbeat:Connect(function(dt)
                 local rot=CFrame.fromOrientation(0,yaw,0);local look=rot*CFrame.Angles(pitch,0,0)
                 local move=rot.RightVector*math.clamp(input.x or 0,-1,1)+rot.LookVector*math.clamp(input.z or 0,-1,1)
                 hum:Move(move.Magnitude>1 and move.Unit or move,false)
-                cam.CFrame=CFrame.new(head.Position)*look;cam.Focus=cam.CFrame*CFrame.new(0,0,-10)
+                local pivot=head.Position+Vector3.new(0,.5,0)
+                local offset=-look.LookVector*orbitDistance
+                local params=RaycastParams.new();params.FilterType=Enum.RaycastFilterType.Exclude;params.FilterDescendantsInstances={char};params.RespectCanCollide=true
+                local hit=workspace:Raycast(pivot,offset,params)
+                if hit then offset=offset.Unit*math.max(.35,hit.Distance-.35) end
+                cam.CFrame=CFrame.new(pivot+offset)*look;cam.Focus=CFrame.new(pivot)
             end
         end
     end
     elapsed+=dt; if elapsed<.10 then return end; elapsed=0
     local cam=workspace.CurrentCamera; if not cam then return end
-    local c=cam.CFrame; remote:FireServer('camera',{p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),f=vec(c.LookVector),fov=cam.FieldOfView})
+    local c=cam.CFrame; remote:FireServer('camera',{p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),f=vec(c.LookVector),fov=cam.FieldOfView},avatarSnapshot())
 end)
 print('[LumenGPU] Press P to toggle local scene streaming')
 ]====])
@@ -104,6 +122,7 @@ local Lighting=game:GetService('Lighting')
 local Players=game:GetService('Players')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera')
 local owner,latest=nil,nil
+local latestAvatar={}
 local lastSnapshot=-100
 local lastPartsJSON=nil
 local function vec(v) return {v.X,v.Y,v.Z} end
@@ -124,23 +143,23 @@ local function snapshot(pos)
         end
     end
     table.sort(items,function(a,b) return a.distance<b.distance end)
-    local out={}; for i=1,math.min(1024,#items) do out[i]=items[i].data end; return out
+    local out={}; for i=1,math.min(960,#items) do out[i]=items[i].data end; return out
 end
-remote.OnServerEvent:Connect(function(player,cmd,data)
+remote.OnServerEvent:Connect(function(player,cmd,data,avatar)
     if cmd=='start' and (not owner or owner==player) then
-        if not owner then owner=player; latest=nil; lastSnapshot=-100; lastPartsJSON=nil; print('[LumenGPU] Local bridge started') end
+        if not owner then owner=player; latest=nil; latestAvatar={}; lastSnapshot=-100; lastPartsJSON=nil; print('[LumenGPU] Local bridge started') end
         remote:FireClient(player,'status','Waiting for HTTP')
     elseif cmd=='stop' and owner==player then owner=nil; latest=nil
     elseif cmd=='camera' and owner==player and type(data)=='table' then
-        if type(data.p)=='table' and #data.p==3 and type(data.r)=='table' and #data.r==3 and type(data.u)=='table' and #data.u==3 and type(data.f)=='table' and #data.f==3 and type(data.fov)=='number' then latest=data end
+        if type(data.p)=='table' and #data.p==3 and type(data.r)=='table' and #data.r==3 and type(data.u)=='table' and #data.u==3 and type(data.f)=='table' and #data.f==3 and type(data.fov)=='number' then latest=data; if type(avatar)=='table' and #avatar<=64 then latestAvatar=avatar end end
     end
 end)
 Players.PlayerRemoving:Connect(function(p) if p==owner then owner=nil; latest=nil end end)
 local lastError=-100
-while task.wait(.15) do
+while task.wait(.135) do
     if owner and latest then
         local ok,err=pcall(function()
-            local now=os.clock(); local update={camera=latest,sun=vec(Lighting:GetSunDirection())}; local newJSON=nil
+            local now=os.clock(); local update={camera=latest,sun=vec(Lighting:GetSunDirection()),avatar=latestAvatar}; local newJSON=nil
             if now-lastSnapshot>=.65 then
                 lastSnapshot=now
                 local p=latest.p; local parts=snapshot(Vector3.new(p[1],p[2],p[3])); newJSON=HTTP:JSONEncode(parts)
@@ -161,4 +180,4 @@ while task.wait(.15) do
     end
 end
 ]====])
-print('LUMEN GPU 0.2.2 installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.2.3 installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')

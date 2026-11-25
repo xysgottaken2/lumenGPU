@@ -66,3 +66,16 @@ func TestBridge(t *testing.T) {
 		t.Fatal("unexpected web frontend")
 	}
 }
+
+func TestAvatarUpdates(t *testing.T) {
+ b:= &Bridge{}; h:=b.handler()
+ cam:=Camera{R:V{1,0,0},U:V{0,1,0},F:V{0,0,-1},Fov:70}
+ part:=Part{R:V{1,0,0},U:V{0,1,0},B:V{0,0,1},S:V{1,1,1},C:V{1,1,1}}
+ world:=[]Part{part}; avatar:=[]Part{part}
+ u:=Update{Camera:cam,Sun:V{0,1,0},Parts:&world,Avatar:&avatar}
+ send:=func(){data,_:=json.Marshal(u);r:=httptest.NewRequest("POST","http://"+addr+"/api/update-controls",strings.NewReader(string(data)));w:=httptest.NewRecorder();h.ServeHTTP(w,r);if w.Code!=200 {t.Fatal(w.Code,w.Body.String())}}
+ send();if len(b.state.Parts)!=2||b.state.Scene!=1 {t.Fatal("initial avatar")}
+ u.Parts=nil; avatar[0].P[0]=3;send();if len(b.state.Parts)!=2||b.state.Parts[0].P[0]!=0||b.state.Parts[1].P[0]!=3||b.state.Scene!=2 {t.Fatal("avatar motion")}
+ send();if b.state.Scene!=2 {t.Fatal("unchanged avatar rebuilt")}
+ avatar=[]Part{};send();if len(b.state.Parts)!=1||b.state.Scene!=3 {t.Fatal("avatar removal")}
+}

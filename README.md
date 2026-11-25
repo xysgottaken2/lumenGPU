@@ -1,5 +1,5 @@
-# LUMEN GPU 0.2.2 — Native DXR
+# LUMEN GPU 0.2.3 — Native DXR
 
-Local Roblox Studio DXR prototype. See [setup and limitations](README.txt). [Build artifacts](../../actions).
+[Setup and limitations](README.txt) | [Windows build artifacts](../../actions)
 
-F2 captures mouse/WASD/Space in the renderer. Title shows F2 ON/OFF, HTTP response (204 = input accepted), movement axes. Studio status reports Input ON/OFF. Reinstall the Lua and replace both executables together.
+Third-person orbit camera and avatar box geometry, separate avatar snapshots, faster native polling, optional camera smoothing (F6), measured scene sync rate in title. Install matching Lua, bridge and renderer together. F2 captures input; Esc releases it.

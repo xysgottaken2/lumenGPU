@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+ "slices"
 	"time"
 )
 
@@ -37,6 +38,7 @@ type Update struct {
 	Camera Camera  `json:"camera"`
 	Sun    V       `json:"sun"`
 	Parts  *[]Part `json:"parts,omitempty"`
+ Avatar *[]Part `json:"avatar,omitempty"`
 }
 type State struct {
 	Camera   Camera `json:"camera"`
@@ -59,6 +61,8 @@ type Bridge struct {
 	state State
  control Control
  controlAt time.Time
+ worldParts []Part
+ avatarParts []Part
 }
 
 func finite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) && math.Abs(x) < 1e7 }
@@ -70,11 +74,12 @@ func valid(u Update) bool {
 	if !vec(c.P) || !axis(c.R) || !axis(c.U) || !axis(c.F) || !finite(c.Fov) || c.Fov < 5 || c.Fov > 120 || !axis(u.Sun) {
 		return false
 	}
-	if u.Parts != nil {
-		if len(*u.Parts) > 1024 {
+	for _, group:=range []*[]Part{u.Parts,u.Avatar} {
+ if group==nil {continue}
+		if len(*group) > 1024 || (group==u.Avatar && len(*group)>64) {
 			return false
 		}
-		for _, p := range *u.Parts {
+		for _, p := range *group {
 			if !vec(p.P) || !axis(p.R) || !axis(p.U) || !axis(p.B) || !vec(p.S) || !vec(p.C) || !finite(p.Metal) || !finite(p.Rough) || !finite(p.Emit) {
 				return false
 			}
@@ -135,10 +140,13 @@ func (b *Bridge) handler() http.Handler {
 		b.mu.Lock()
 		b.state.Camera = u.Camera
 		b.state.Sun = u.Sun
-		if u.Parts != nil {
-			b.state.Parts = *u.Parts
-			b.state.Scene++
-		}
+  changed:=false
+  if u.Parts!=nil && !slices.Equal(b.worldParts,*u.Parts) {b.worldParts=*u.Parts;changed=true}
+  if u.Avatar!=nil && !slices.Equal(b.avatarParts,*u.Avatar) {b.avatarParts=*u.Avatar;changed=true}
+  if changed { // Allocate a new slice; concurrent readers retain an immutable snapshot.
+   limit:=1024-len(b.avatarParts);if len(b.worldParts)<limit {limit=len(b.worldParts)}
+   combined:=make([]Part,0,limit+len(b.avatarParts));combined=append(combined,b.worldParts[:limit]...);combined=append(combined,b.avatarParts...);b.state.Parts=combined;b.state.Scene++
+  }
 		b.state.Seq++
 		b.state.Received = time.Now().UnixMilli()
   c:=Control{}
@@ -165,7 +173,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("LUMEN GPU 0.2.2 | Native bridge at http://" + addr + " | Ctrl+C to stop")
+	fmt.Println("LUMEN GPU 0.2.3 | Native bridge at http://" + addr + " | Ctrl+C to stop")
 	s := http.Server{Handler: (&Bridge{}).handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
 	log.Fatal(s.Serve(l))
 }
