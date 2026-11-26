@@ -79,7 +79,8 @@ func(b *Bridge)nativeSplitStream(w http.ResponseWriter,r *http.Request,channel i
   // The native receiver ignores repeated revision keys.
   if rev==last{s.Parts=nil}
   c.SetWriteDeadline(time.Now().Add(time.Second))
-  if c.WriteMessage(websocket.BinaryMessage,nativePacket(s))!=nil{return}
+  packet:=nativePacket(s);if channel==0{packet=nativeEnvironmentPacket(s)}
+  if c.WriteMessage(websocket.BinaryMessage,packet)!=nil{return}
   last=rev;lastSend=time.Now()
  }
 }

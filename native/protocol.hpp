@@ -6,7 +6,7 @@
 #include <stdexcept>
 struct V { float x,y,z; float operator[](int i) const { return i==0?x:i==1?y:z; } };
 struct Part { V p,r,u,b,s,c; float metal,rough,emit,transmission=0,ior=1.5f,shape=0,specular=1; V emissionColor{0,0,0}; };
-struct Scene { uint64_t revision=0,seq=0; V p,r,u,f; float fov; V sun; std::vector<Part> parts; size_t characterCount=0; uint64_t poseRevision=0; };
+struct Scene { uint64_t revision=0,seq=0; V p,r,u,f; float fov; V sun; std::vector<Part> parts; size_t characterCount=0; uint64_t poseRevision=0; float clock=12,sunSize=11,brightness=2,celestial=1; };
 static_assert(sizeof(V)==12 && sizeof(Part)==112);
 // A box proxy can enclose the camera even when its source mesh does not.
 // Keep transmissive volumes, since the camera can legitimately be inside glass.
@@ -39,12 +39,13 @@ inline V triangleNormal(V a,V b,V c){
  return len>1e-12f?V{n.x/len,n.y/len,n.z/len}:V{0,1,0};
 }
 inline Scene parse(const std::vector<unsigned char>& a) {
- if(a.size()<88||memcmp(a.data(),"LGR4",4)) throw std::runtime_error("Invalid bridge header");
+ if(a.size()<88||(memcmp(a.data(),"LGR4",4)&&memcmp(a.data(),"LGR5",4))) throw std::runtime_error("Invalid bridge header");
+ bool env=!memcmp(a.data(),"LGR5",4);
  size_t at=4; auto read=[&](auto& v){if(at+sizeof(v)>a.size())throw std::runtime_error("Truncated bridge packet"); memcpy(&v,a.data()+at,sizeof(v));at+=sizeof(v);};
  Scene s; uint32_t count; read(s.revision);read(s.seq);read(count);
- if(count>16384||a.size()!=88+size_t(count)*112)throw std::runtime_error("Invalid bridge length");
+ if(count>16384||a.size()!=88+size_t(count)*112+(env?16:0))throw std::runtime_error("Invalid bridge length");
  read(s.p);read(s.r);read(s.u);read(s.f);read(s.fov);read(s.sun);
- s.parts.resize(count); for(auto& p:s.parts)read(p);return s;
+ s.parts.resize(count); for(auto& p:s.parts)read(p);if(env){read(s.clock);read(s.sunSize);read(s.brightness);read(s.celestial);}return s;
 }
 inline Scene demo(){Scene s; s.p={0,3,9};s.r={1,0,0};s.f={0,-.187f,-.98236f};s.u={0,.98236f,-.187f};s.fov=55;s.sun={.414f,.88f,.259f};
  auto box=[&](V p,V size,V c,float m=0,float r=.45f,float e=0){Part part{p,{1,0,0},{0,1,0},{0,0,1},size,c,m,r,e};part.emissionColor=c;s.parts.push_back(part);};

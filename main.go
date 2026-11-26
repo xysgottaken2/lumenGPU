@@ -40,7 +40,14 @@ type Part struct {
  Specular float64 `json:"specular"`
  EmissionColor V `json:"emissionColor"`
 }
+type Environment struct {
+ Clock float64 `json:"clock"`
+ SunSize float64 `json:"sunSize"`
+ Brightness float64 `json:"brightness"`
+ Celestial bool `json:"celestial"`
+}
 type Update struct {
+ Environment *Environment `json:"environment,omitempty"`
 	Camera Camera  `json:"camera"`
 	Sun    V       `json:"sun"`
 	Parts  *[]Part `json:"parts,omitempty"`
@@ -48,6 +55,7 @@ type Update struct {
  Character *[]Part `json:"character,omitempty"`
 }
 type State struct {
+ Environment *Environment `json:"environment,omitempty"`
 	Camera   Camera `json:"camera"`
 	Sun      V      `json:"sun"`
 	Parts    []Part `json:"parts"`
@@ -84,7 +92,8 @@ func vec(v V) bool          { return finite(v[0]) && finite(v[1]) && finite(v[2]
 func norm(v V) float64      { return math.Sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]) }
 func axis(v V) bool         { return vec(v) && math.Abs(norm(v)-1) < .03 }
 func valid(u Update) bool {
-	c := u.Camera
+	if e:=u.Environment;e!=nil&&(!finite(e.Clock)||e.Clock<0||e.Clock>24||!finite(e.SunSize)||e.SunSize<0||e.SunSize>180||!finite(e.Brightness)||e.Brightness<0||e.Brightness>100){return false}
+ c := u.Camera
 	if !vec(c.P) || !axis(c.R) || !axis(c.U) || !axis(c.F) || !finite(c.Fov) || c.Fov < 5 || c.Fov > 120 || !axis(u.Sun) {
 		return false
 	}
@@ -112,7 +121,7 @@ func valid(u Update) bool {
 func (b *Bridge) apply(u Update,wantsControls bool) Control {return b.applyMode(u,wantsControls,false)}
 func (b *Bridge) applyMode(u Update,wantsControls,geometryOnly bool) Control {
 		b.mu.Lock()
- if !geometryOnly {b.state.Camera=u.Camera;b.state.Sun=u.Sun}
+ if !geometryOnly {b.state.Camera=u.Camera;b.state.Sun=u.Sun;if u.Environment!=nil{e:=*u.Environment;b.state.Environment=&e}}
   changed:=false
   if u.Parts!=nil && !slices.Equal(b.worldParts,*u.Parts) {b.worldParts=*u.Parts;b.worldRevision++;changed=true}
   if u.Avatar!=nil && !slices.Equal(b.avatarParts,*u.Avatar) {b.avatarParts=*u.Avatar;b.movingRevision++;changed=true}
@@ -207,7 +216,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("LUMEN GPU 0.7 | Native bridge at http://" + addr + " | Ctrl+C to stop")
+	fmt.Println("LUMEN GPU 0.8 | Native bridge at http://" + addr + " | Ctrl+C to stop")
 	s := http.Server{Handler: (&Bridge{}).handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
 	log.Fatal(s.Serve(l))
 }

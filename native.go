@@ -15,3 +15,12 @@ func nativePacket(s State) []byte {
  for _,p:=range s.Parts {vec(p.P);vec(p.R);vec(p.U);vec(p.B);vec(p.S);vec(p.C);put(p.Metal);put(p.Rough);put(p.Emit);put(p.Transmission);put(p.IOR);put(p.Shape);put(p.Specular);vec(p.EmissionColor)}
  return b
 }
+
+func nativeEnvironmentPacket(s State) []byte {
+ b:=nativePacket(s)
+ if s.Environment==nil{return b}
+ copy(b,"LGR5");e:=s.Environment
+ for _,v:=range []float64{e.Clock,e.SunSize,e.Brightness,0}{b=binary.LittleEndian.AppendUint32(b,math.Float32bits(float32(v)))}
+ if e.Celestial{binary.LittleEndian.PutUint32(b[len(b)-4:],math.Float32bits(1))}
+ return b
+}
