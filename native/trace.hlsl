@@ -41,6 +41,31 @@ float3 visibleSun(float3 d){
 }
 RayDesc ray(float3 o,float3 d,float limit){RayDesc r;r.Origin=o;r.Direction=d;r.TMin=.001;r.TMax=limit;return r;}
 bool blocked(float3 o,float3 d){RayQuery<RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;q.TraceRayInline(scene,RAY_FLAG_NONE,255,ray(o,d,quality.x));while(q.Proceed()){}return q.CommittedStatus()==COMMITTED_TRIANGLE_HIT;}
+// Straight-line colored shadow transmission. Each boundary contributes
+// sqrt(tint * transmission), so a closed pane applies its tint once.
+// This is thin-glass visibility, not refracted caustic transport.
+float3 lightVisibility(float3 o,float3 d){
+ if(switches.z<=0)return blocked(o,d)?float3(0,0,0):float3(1,1,1);
+ float3 visibility=1;float remaining=quality.x;
+ [loop]for(uint layer=0;layer<16;++layer){
+  if(remaining<=.001)return visibility;
+  RayQuery<RAY_FLAG_FORCE_OPAQUE> q;
+  q.TraceRayInline(scene,RAY_FLAG_NONE,255,ray(o,d,remaining));
+  while(q.Proceed()){}
+  if(q.CommittedStatus()!=COMMITTED_TRIANGLE_HIT)return visibility;
+  Material m=mats[q.CommittedInstanceID()];
+  float trans=saturate(m.roughEmit.z)*(1-saturate(m.colorMetal.w));
+  if(trans<=.001)return 0;
+  float ior=clamp(m.roughEmit.w,1.001,3);
+  float f=(ior-1)/(ior+1);f*=f;
+  visibility*=sqrt(saturate(linearColor(m.colorMetal.xyz)*trans))*(1-f);
+  if(max(visibility.r,max(visibility.g,visibility.b))<.001)return 0;
+  float advance=q.CommittedRayT()+.0015;
+  o+=d*advance;remaining-=advance;
+ }
+ // Conservatively reject rays whose layer budget was exhausted.
+ return 0;
+}
 float smith(float n,float a2){return 2*n/max(1e-6,n+sqrt(a2+(1-a2)*n*n));}
 float3 fresnel(float v,float3 f0){return f0+(1-f0)*pow(1-saturate(v),5);}
 float powerWeight(float a,float b){return a*a/max(1e-12,a*a+b*b);}
@@ -77,16 +102,16 @@ float3 path(float3 o,float3 d,inout uint seed,out float4 guide,out float4 alb){
   float prob=(spec>0||metal>0)?(.25+.65*metal)*switches.y:0;
   if(i==0){guide=float4(n,q.CommittedRayT());alb=float4(c,float(q.CommittedInstanceID()+1));}
   if(options.w==1)return c;if(options.w==2)return n*.5+.5;
-  if(options.w==4){float v=saturate(dot(n,sun.xyz));return v>0&&sun.y>0&&!blocked(p+n*.003,sun.xyz)?v:0;}
-  if(options.w==5)return blocked(p+n*.003,float3(0,1,0))?0:1;
+  if(options.w==4){float v=saturate(dot(n,sun.xyz));return v>0&&sun.y>0?lightVisibility(p+n*.003,sun.xyz)*v:float3(0,0,0);}
+  if(options.w==5)return lightVisibility(p+n*.003,float3(0,1,0));
   if(i==0)L+=c*(1-metal)*opaque*quality.w*lerp(.035,1,daylight());
   if(entering)L+=beta*linearColor(m.emitColor.xyz)*m.roughEmit.y;
   if(opaque>0&&entering){
    float3 wi=sunDirection(seed);float nl=dot(n,wi),pdf;
    float3 f=evalBSDF(n,wo,wi,c,metal,rough,ior,spec,prob,pdf);
-   if(nl>0&&sunPower()>0&&!blocked(p+n*.003,wi))L+=beta*f*opaque*nl*sunTint()*5*sunPower();
+   if(nl>0&&sunPower()>0)L+=beta*f*opaque*nl*sunTint()*5*sunPower()*lightVisibility(p+n*.003,wi);
    if(switches.x>0){float z=rnd(seed),phi=2*PI*rnd(seed),r=sqrt(1-z*z);wi=basis(n,r*cos(phi),r*sin(phi),z);f=evalBSDF(n,wo,wi,c,metal,rough,ior,spec,prob,pdf);
-    float lp=1/(2*PI);if(!blocked(p+n*.003,wi))L+=beta*f*opaque*sky(wi)*(z/lp)*(i==uint(options.x)?1:powerWeight(lp,pdf*opaque));}
+    float lp=1/(2*PI);L+=beta*f*opaque*sky(wi)*(z/lp)*(i==uint(options.x)?1:powerWeight(lp,pdf*opaque))*lightVisibility(p+n*.003,wi);}
   }
   if(i==uint(options.x))break;
   if(trans>0&&(!entering||rnd(seed)<trans)){
