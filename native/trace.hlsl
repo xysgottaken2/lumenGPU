@@ -1,5 +1,5 @@
 RaytracingAccelerationStructure scene : register(t0);
-struct Material {float4 colorMetal,roughEmit,ax,ay,az,scaleSpec,emitColor;};
+struct Material {float4 colorMetal,roughEmit,ax,ay,az,scaleSpec,emitColor,tex0,tex1;};
 StructuredBuffer<Material> mats : register(t1);
 StructuredBuffer<float3> meshNormals : register(t2);
 RWStructuredBuffer<float4> history : register(u0);
@@ -18,6 +18,32 @@ float rnd(inout uint s){s=hash(s+0x9e3779b9u);return float(s>>8)*(1.0/16777216.0
 float3 basis(float3 n,float x,float y,float z){float3 t=normalize(cross(abs(n.y)>.95?float3(1,0,0):float3(0,1,0),n));return normalize(t*x+cross(n,t)*y+n*z);}
 float3 cosine(float3 n,inout uint s){float phi=2*PI*rnd(s),r=sqrt(rnd(s));return basis(n,r*cos(phi),r*sin(phi),sqrt(max(0,1-r*r)));}
 float3 linearColor(float3 c){c=saturate(c);return lerp(c/12.92,pow((c+.055)/1.055,2.4),step(.04045,c));}
+float4 assetTexel(uint base,uint2 p){uint v=sunPixels[base+p.y*256+p.x];return float4(v&255u,(v>>8)&255u,(v>>16)&255u,(v>>24)&255u)/255.;}
+float4 assetSample(uint base,float2 uv,bool wrap){
+ float2 coord=wrap?frac(uv)*256-.5:saturate(uv)*255;
+ int2 a=int2(floor(coord)),b=a+1;float2 f=frac(coord);
+ uint2 p0=wrap?uint2(a&255):uint2(clamp(a,0,255));
+ uint2 p1=wrap?uint2(b&255):uint2(clamp(b,0,255));
+ return lerp(lerp(assetTexel(base,p0),assetTexel(base,uint2(p1.x,p0.y)),f.x),lerp(assetTexel(base,uint2(p0.x,p1.y)),assetTexel(base,p1),f.x),f.y);
+}
+float3 surfaceColor(Material m,uint primitive,float3 localP,float2 bary){
+ float3 c=linearColor(m.colorMetal.xyz);if(m.tex0.x<=0)return c;
+ uint mode=uint(m.tex0.y);float2 uv=0;
+ if(mode==0){uint at=uint(m.az.w)+primitive*3;if(m.az.w<=0)return c;uv=meshNormals[at].xy*(1-bary.x-bary.y)+meshNormals[at+1].xy*bary.x+meshNormals[at+2].xy*bary.y;}
+ else {
+  if(primitive/2+1!=mode)return c;
+  if(mode==1)uv=float2(-localP.z,-localP.y)+.5;
+  else if(mode==2)uv=float2(localP.z,-localP.y)+.5;
+  else if(mode==3)uv=float2(localP.x,localP.z)+.5;
+  else if(mode==4)uv=float2(localP.x,-localP.z)+.5;
+  else if(mode==5)uv=float2(localP.x,-localP.y)+.5;
+  else uv=float2(-localP.x,-localP.y)+.5;
+ }
+ uv=uv*m.tex0.zw+m.tex1.xy;
+ float4 tex=assetSample(uint(m.tex0.x),uv,m.tex1.w>0);
+ float3 texColor=linearColor(tex.rgb);
+ return lerp(c,mode==0?c*texColor:texColor,saturate(tex.a*m.tex1.z));
+}
 float daylight(){return smoothstep(-.16,.12,sun.y);}
 float sunPower(){return smoothstep(-.035,.08,sun.y)*quality.z*environment.z;}
 float3 sunTint(){return lerp(float3(1,.28,.065),float3(1,.93,.8),smoothstep(0,.35,sun.y));}
@@ -96,7 +122,7 @@ float3 path(float3 o,float3 d,inout uint seed,out float4 guide,out float4 alb){
   else {uint face=primitive/2;ln=face<2?float3(1,0,0):face<4?float3(0,1,0):float3(0,0,1);if(face%2==1)ln=-ln;}
   float3 invN=ln/max(m.scaleSpec.xyz,.0001);float3 gn=normalize(m.ax.xyz*invN.x+m.ay.xyz*invN.y+m.az.xyz*invN.z);
   bool entering=dot(gn,d)<0;float3 n=entering?gn:-gn,wo=-d;
-  float3 p=o+d*q.CommittedRayT(),c=linearColor(m.colorMetal.xyz);
+  float3 p=o+d*q.CommittedRayT(),c=surfaceColor(m,primitive,localP,q.CommittedTriangleBarycentrics());
   float metal=saturate(m.colorMetal.w),rough=clamp(m.roughEmit.x,.025,1),ior=clamp(m.roughEmit.w,1.001,3),spec=saturate(m.scaleSpec.w);
   float trans=saturate(m.roughEmit.z)*(1-metal)*switches.z,opaque=1-trans;
   float prob=(spec>0||metal>0)?(.25+.65*metal)*switches.y:0;

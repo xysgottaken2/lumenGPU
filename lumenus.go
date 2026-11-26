@@ -19,7 +19,6 @@ import (
  "strings"
  "sync"
  "time"
- "image"
  _ "image/jpeg"
  _ "image/png"
 )
@@ -34,6 +33,7 @@ type Lumenus struct {
  images chan assetJob
  entries map[string]assetResult
  ids map[uint32]string
+ imageIDs map[uint32]string
  dir,key,imports string
  oauth *oauthSession
  ctx context.Context
@@ -46,7 +46,7 @@ func newLumenus(b *Bridge, root string) (*Lumenus,error) {
  if err:=os.MkdirAll(root,0700);err!=nil{return nil,err}
  dir,err:=os.MkdirTemp(root,"session-");if err!=nil{return nil,err}
  ctx,cancel:=context.WithCancel(context.Background())
- l:=&Lumenus{jobs:make(chan assetJob,256),images:make(chan assetJob,128),entries:map[string]assetResult{},ids:map[uint32]string{},dir:dir,key:os.Getenv("LUMEN_ASSET_API_KEY"),imports:filepath.Join(filepath.Dir(root),"AssetImports"),ctx:ctx,cancel:cancel,bridge:b}
+ l:=&Lumenus{jobs:make(chan assetJob,256),images:make(chan assetJob,128),entries:map[string]assetResult{},ids:map[uint32]string{},imageIDs:map[uint32]string{},dir:dir,key:os.Getenv("LUMEN_ASSET_API_KEY"),imports:filepath.Join(filepath.Dir(root),"AssetImports"),ctx:ctx,cancel:cancel,bridge:b}
  l.wg.Add(1);go l.worker();return l,nil
 }
 func(l *Lumenus)close(){l.cancel();l.wg.Wait();os.RemoveAll(l.dir)}
@@ -54,7 +54,7 @@ func assetKey(r assetRequest)(string,bool){
  n,e:=strconv.ParseUint(r.Asset,10,64)
  if e!=nil||n==0||strconv.FormatUint(n,10)!=r.Asset{return "",false}
  if r.Kind=="mesh"&&meshID(r.ID){return r.Kind+":"+r.Asset,true}
- if r.Kind=="image"&&r.ID==0{return r.Kind+":"+r.Asset,true}
+ if r.Kind=="image"&&r.ID<=textureMax{return r.Kind+":"+r.Asset,true}
  return "",false
 }
 func(l *Lumenus)handler(w http.ResponseWriter,r *http.Request){
@@ -67,6 +67,10 @@ func(l *Lumenus)handler(w http.ResponseWriter,r *http.Request){
   if prior,found:=l.ids[a.ID];found&&prior!=key{http.Error(w,"mesh ID collision",409);return}
   // One renderer ID per asset in this session. Client already deduplicates.
   key=key+":"+strconv.FormatUint(uint64(a.ID),10)
+ }
+ if a.Kind=="image"&&a.ID>0{
+  if prior,found:=l.imageIDs[a.ID];found&&prior!=key{http.Error(w,"texture slot collision",409);return}
+  l.imageIDs[a.ID]=key;key=key+":"+strconv.FormatUint(uint64(a.ID),10)
  }
  result,found:=l.entries[key]
  if !found {
@@ -131,14 +135,17 @@ func(l *Lumenus)process(a assetRequest)assetResult{
  if e!=nil{return assetResult{Status:"failed",Detail:e.Error()}}
  if !cached&&l.used+int64(len(data))>128<<20{return assetResult{Status:"failed",Detail:"session disk cap"}}
  if a.Kind=="image" {
-  cfg,_,e:=image.DecodeConfig(bytes.NewReader(data));if e!=nil||cfg.Width<1||cfg.Height<1||cfg.Width>8192||cfg.Height>8192{return assetResult{Status:"failed",Detail:"unsupported image format or dimensions"}}
-  if !cached {if e=os.WriteFile(cachePath,data,0600);e!=nil{return assetResult{Status:"failed",Detail:"cache write failed"}};l.used+=int64(len(data))};return assetResult{Status:"cached",Detail:"image cached; GPU texture mapping not implemented"}
+  pixels,e:=decodeTexture(data);if e!=nil{return assetResult{Status:"failed",Detail:"unsupported image format or dimensions"}}
+  if !cached {if e=os.WriteFile(cachePath,data,0600);e!=nil{return assetResult{Status:"failed",Detail:"cache write failed"}};l.used+=int64(len(data))}
+  if a.ID==0{return assetResult{Status:"cached"}}
+  b:=l.bridge;b.mu.Lock();if b.textures==nil{b.textures=map[uint32][]uint32{}};b.textures[a.ID]=pixels;b.mu.Unlock()
+  return assetResult{Status:"ready",Detail:"texture pixels ready for renderer"}
  }
  vs,size,e:=decodeLumenMesh(data);if e!=nil{return assetResult{Status:"failed",Detail:e.Error()}}
- m:=MeshUpload{ID:a.ID,Vertices:vs};if !meshValid(m){return assetResult{Status:"failed",Detail:"invalid normalized mesh"}}
+ uv:=decodeLumenUV(data,len(vs));m:=MeshUpload{ID:a.ID,Vertices:vs,UVs:uv};if !meshValid(m){return assetResult{Status:"failed",Detail:"invalid normalized mesh"}}
  b:=l.bridge;b.mu.Lock();defer b.mu.Unlock()
  if _,ok:=b.meshes[a.ID];ok||len(b.meshes)>=256||b.meshVertices+len(vs)>meshTotalVertices{return assetResult{Status:"failed",Detail:"mesh ID collision or cache full"}}
- if !cached {if e=os.WriteFile(cachePath,data,0600);e!=nil{return assetResult{Status:"failed",Detail:"cache write failed"}};l.used+=int64(len(data))};if b.meshes==nil{b.meshes=map[uint32][]V{}};b.meshes[a.ID]=vs;b.meshVertices+=len(vs)
+ if !cached {if e=os.WriteFile(cachePath,data,0600);e!=nil{return assetResult{Status:"failed",Detail:"cache write failed"}};l.used+=int64(len(data))};if b.meshes==nil{b.meshes=map[uint32][]V{}};if b.meshUV==nil{b.meshUV=map[uint32][]UV{}};b.meshUV[a.ID]=uv;b.meshes[a.ID]=vs;b.meshVertices+=len(vs)
  return assetResult{Status:"ready",Size:size}
 }
 // Decode rigid FileMesh v2/v3 and v4/v5 geometry. Skinned meshes are
@@ -168,4 +175,23 @@ func decodeLumenMesh(data []byte)([]V,V,error){
  out:=make([]V,0,count*3)
  for j:=0;j<count*3;j++{idx:=u32(start+j*4);if idx<0||idx>=nv{return fail()};v:=points[idx];for k:=0;k<3;k++{v[k]/=size[k]};out=append(out,v)}
  return out,size,nil
+}
+
+// Called only after decodeLumenMesh has validated header, LOD and indices.
+func decodeLumenUV(data []byte,count int)[]UV{
+ i:=bytes.IndexByte(data,'\n');if i<0{return nil};version:=strings.TrimSpace(string(data[:i]));d:=data[i+1:]
+ if len(d)<12{return nil}
+ h:=int(binary.LittleEndian.Uint16(d));stride:=int(d[2]);nv:=0
+ switch version{case "version 2.00":nv=int(binary.LittleEndian.Uint32(d[4:]));case "version 3.00","version 3.01":if len(d)<16{return nil};nv=int(binary.LittleEndian.Uint32(d[8:]));case "version 4.00","version 4.01","version 5.00":stride=40;nv=int(binary.LittleEndian.Uint32(d[4:]));default:return nil}
+ if h<12||stride<32||nv<3||nv>200000||count<3||count>60000{return nil}
+ start:=h+nv*stride;if start+count*4>len(d){return nil}
+ uv:=make([]UV,count)
+ for j:=range uv{
+  idx:=int(binary.LittleEndian.Uint32(d[start+j*4:]));if idx<0||idx>=nv{return nil}
+  pos:=h+idx*stride+24
+  u:=float64(math.Float32frombits(binary.LittleEndian.Uint32(d[pos:])))
+  v:=float64(math.Float32frombits(binary.LittleEndian.Uint32(d[pos+4:])))
+  uv[j]=UV{u,v};if !validUV(uv[j]){return nil}
+ }
+ return uv
 }

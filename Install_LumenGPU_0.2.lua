@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.9)')
+print('[LumenGPU] Client starting (0.9.1)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -162,24 +162,46 @@ end
 local function discoverImage(uri)
     local id=numericAsset(uri)
     if id and not externalImages[id] and imageCount<128 then
-        externalImages[id]=true;imageCount+=1;imageQueue[#imageQueue+1]=id
+        imageCount+=1;externalImages[id]=imageCount;imageQueue[#imageQueue+1]={asset=id,slot=imageCount}
     end
+    return id and externalImages[id] or 0
 end
+local faceCode={[Enum.NormalId.Right]=1,[Enum.NormalId.Left]=2,[Enum.NormalId.Top]=3,[Enum.NormalId.Bottom]=4,[Enum.NormalId.Back]=5,[Enum.NormalId.Front]=6}
 local function discoverImages(obj)
-    if obj:IsA('MeshPart') then discoverImage(obj.TextureID) end
-    for _,child in obj:GetChildren() do
-        if child:IsA('SpecialMesh') then discoverImage(child.TextureId)
-        elseif child:IsA('Decal') or child:IsA('Texture') then discoverImage(child.Texture)
-        elseif child:IsA('SurfaceAppearance') then
-            discoverImage(child.ColorMap);discoverImage(child.NormalMap)
-            discoverImage(child.RoughnessMap);discoverImage(child.MetalnessMap)
+    local slot=0
+    if obj:IsA('MeshPart') then slot=discoverImage(obj.TextureID) end
+    local special=obj:FindFirstChildOfClass('SpecialMesh')
+    if special and special.MeshType==Enum.MeshType.FileMesh then slot=discoverImage(special.TextureId) end
+    local surface=obj:FindFirstChildOfClass('SurfaceAppearance')
+    if surface then local color=discoverImage(surface.ColorMap);if color>0 then slot=color end end
+    if slot>0 then return {slot,0,1,1,0,0,1,0} end
+    if obj:IsA('Part') and obj.Shape==Enum.PartType.Block then
+        for _,child in obj:GetChildren() do
+            if child:IsA('Decal') or child:IsA('Texture') then
+                slot=discoverImage(child.Texture)
+                local face=faceCode[child.Face]
+                if slot>0 and face then
+                    local su,sv,ou,ov,wrap=1,1,0,0,0
+                    if child:IsA('Texture') then
+                        local w=face<=2 and obj.Size.Z or obj.Size.X
+                        local h=(face==3 or face==4) and obj.Size.Z or obj.Size.Y
+                        su=math.clamp(w/math.max(child.StudsPerTileU,.001),.0001,4096)
+                        sv=math.clamp(h/math.max(child.StudsPerTileV,.001),.0001,4096)
+                        ou=math.clamp(-child.OffsetStudsU/math.max(child.StudsPerTileU,.001),-4096,4096)
+                        ov=math.clamp(-child.OffsetStudsV/math.max(child.StudsPerTileV,.001),-4096,4096)
+                        wrap=1
+                    end
+                    return {slot,face,su,sv,ou,ov,1-child.Transparency,wrap}
+                end
+            end
         end
     end
+    return nil
 end
 local imageScanned=setmetatable({},{__mode='k'})
 task.spawn(function()
     while task.wait(.5) do
-        if active and #imageQueue>0 then remote:FireServer('lumenusImage',table.remove(imageQueue,1)) end
+        if active and #imageQueue>0 then local q=table.remove(imageQueue,1);remote:FireServer('lumenusImage',q.asset,q.slot) end
     end
 end)
 local function meshEntry(obj)
@@ -214,7 +236,12 @@ local function extractMesh(entry)
         for i,face in faces do
             local ids=editable:GetFaceVertices(face)
             if #ids==3 then
-                for _,id in ids do local v=editable:GetPosition(id)/scale;rows[#rows+1]=vec(v) end
+                local faceUVs=editable:GetFaceUVs(face)
+                for j,id in ids do
+                    local v=editable:GetPosition(id)/scale
+                    local uv=faceUVs[j] and editable:GetUV(faceUVs[j]) or Vector2.zero
+                    rows[#rows+1]={v.X,v.Y,v.Z,uv.X,uv.Y}
+                end
             end
             if i%128==0 then task.wait() end
         end
@@ -323,7 +350,7 @@ local function materialPart(obj)
         if obj.Shape==Enum.PartType.Ball then shape=1 elseif obj.Shape==Enum.PartType.Cylinder then shape=2 elseif obj.Shape==Enum.PartType.Wedge then shape=-1 elseif obj.Shape==Enum.PartType.CornerWedge then shape=-2 end
     end
     if shape==-1 or shape==-2 then c,size=orientWedge(obj,c,size,shape) end
-    if not imageScanned[obj] then imageScanned[obj]=true;discoverImages(obj) end
+    local tex=imageScanned[obj];if tex==nil then tex=discoverImages(obj) or false;imageScanned[obj]=tex end
     local e,special=meshEntry(obj)
     if e and e.state=='ready' then
         shape=e.id
@@ -334,7 +361,7 @@ local function materialPart(obj)
         end
         size=Vector3.new(math.max(size.X,.0001),math.max(size.Y,.0001),math.max(size.Z,.0001))
     end
-    return {p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(size),c={color.R,color.G,color.B},metal=num('PathMetallic',metal,0,1),rough=num('PathRoughness',rough,.025,1),emit=num('PathEmission',(obj:GetAttribute('PathEmissive')==true or mat==Enum.Material.Neon) and 4 or 0,0,50),transmission=num('PathTransmission',mat==Enum.Material.Glass and 1 or obj.Transparency,0,1),ior=num('PathIOR',1.5,1.001,3),shape=shape,specular=num('PathSpecular',1,0,1),emissionColor={ec.R,ec.G,ec.B}}
+    return {p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(size),c={color.R,color.G,color.B},metal=num('PathMetallic',metal,0,1),rough=num('PathRoughness',rough,.025,1),emit=num('PathEmission',(obj:GetAttribute('PathEmissive')==true or mat==Enum.Material.Neon) and 4 or 0,0,50),transmission=num('PathTransmission',mat==Enum.Material.Glass and 1 or obj.Transparency,0,1),ior=num('PathIOR',1.5,1.001,3),shape=shape,specular=num('PathSpecular',1,0,1),emissionColor={ec.R,ec.G,ec.B},tex=tex or nil}
 end
 local function avatarSnapshot()
     local list={};local char=player.Character;if not char then return list end
@@ -700,9 +727,10 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
             if owner==player then remote:FireClient(player,'lumenusMeshAck',meshId,result or false) end
         end)
     elseif cmd=='lumenusImage' and owner==player then
-        if type(data)~='string' or #data>20 or not data:match('^[1-9]%d*$') then return end
+        if type(data)~='string' or #data>20 or not data:match('^[1-9]%d*$') or type(avatar)~='number' or avatar%1~=0 or avatar<1 or avatar>128 then return end
+        local asset,slot=data,avatar
         task.spawn(function()
-            pcall(function() HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/lumenus',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode({kind='image',asset=data,id=0})}) end)
+            pcall(function() HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/lumenus',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode({kind='image',asset=asset,id=slot})}) end)
         end)
     elseif cmd=='meshBegin' and owner==player then
         if type(data)=='number' and data%1==0 and data>=3 and data<=16777215 and type(avatar)=='number' and avatar%3==0 and avatar>=3 and avatar<=60000 then pendingMesh={id=data,count=avatar,rows={}} end
@@ -715,7 +743,12 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
             -- One asset at a time; pace requests under HTTP limits.
             local waitFor=math.max(0,2-(os.clock()-lastMeshUpload));if waitFor>0 then task.wait(waitFor) end
             lastMeshUpload=os.clock()
-            local ok,res=pcall(function() return HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/mesh',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode({id=batch.id,vertices=batch.rows})}) end)
+            local vertices,uvs={},{}
+            for _,row in batch.rows do
+                if type(row)~='table' or #row~=5 then remote:FireClient(player,'meshAck',batch.id,false);return end
+                vertices[#vertices+1]={row[1],row[2],row[3]};uvs[#uvs+1]={row[4],row[5]}
+            end
+            local ok,res=pcall(function() return HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/mesh',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode({id=batch.id,vertices=vertices,uvs=uvs})}) end)
             if owner==player then remote:FireClient(player,'meshAck',batch.id,ok and res.Success) end
             if not ok or not res.Success then warn('[LumenGPU] Mesh HTTP upload failed: '..tostring(ok and res.StatusCode or res)) end
         end)
@@ -806,4 +839,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.9 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.9.1 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')

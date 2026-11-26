@@ -44,6 +44,7 @@ type Part struct {
  Shape float64 `json:"shape"`
  Specular float64 `json:"specular"`
  EmissionColor V `json:"emissionColor"`
+ Tex [8]float64 `json:"tex"`
 }
 type Environment struct {
  Clock float64 `json:"clock"`
@@ -95,6 +96,8 @@ type Bridge struct {
  characterParts []Part
  worldRevision,movingRevision,characterRevision uint64
  meshes map[uint32][]V
+ meshUV map[uint32][]UV
+ textures map[uint32][]uint32
  meshVertices int
  lumenus *Lumenus
 }
@@ -116,6 +119,7 @@ func valid(u Update) bool {
 			return false
 		}
 		for _, p := range *group {
+   if !validTexture(p.Tex){return false}
 			if !vec(p.P) || !axis(p.R) || !axis(p.U) || !axis(p.B) || !vec(p.S) || !vec(p.C) || !finite(p.Metal) || !finite(p.Rough) || !finite(p.Emit) || !finite(p.Transmission) || !finite(p.IOR) || !finite(p.Shape) || !finite(p.Specular) || !vec(p.EmissionColor) {
 				return false
 			}
@@ -162,6 +166,7 @@ func (b *Bridge) handler() http.Handler {
  mux.HandleFunc("/api/native-world-ws",func(w http.ResponseWriter,r *http.Request){b.nativeSplitStream(w,r,1)})
  mux.HandleFunc("/api/native-moving-ws",func(w http.ResponseWriter,r *http.Request){b.nativeSplitStream(w,r,2)})
  mux.HandleFunc("/api/mesh",b.meshHandler)
+ mux.HandleFunc("/api/texture",b.textureHandler)
  if b.lumenus!=nil {mux.HandleFunc("/api/lumenus",b.lumenus.handler)}
  mux.HandleFunc("/api/input", func(w http.ResponseWriter,r *http.Request){
   if r.Method!="POST" || r.Header.Get("Origin")!="" {http.Error(w,"native POST only",403);return}
@@ -238,7 +243,7 @@ func main() {
  b.lumenus=worker
  defer worker.close()
  if len(os.Args)>1&&os.Args[1]=="--connect" {ctx,cancel:=signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM);session,e:=configureOAuth(ctx);cancel();if e!=nil{log.Printf("[Lumenus] Authorization failed: %v; continuing with local imports/API key",e)}else{worker.oauth=session;log.Println("[Lumenus] Roblox authorization successful (session only)")}}else if worker.key==""{log.Println("[Lumenus] Local-only mode. Run Connect-Roblox.bat for Roblox account authorization.")}
- fmt.Println("LUMEN GPU 0.9 | Lumenus session cache:",worker.dir)
+ fmt.Println("LUMEN GPU 0.9.1 | Lumenus session cache:",worker.dir)
  fmt.Println("Native bridge at http://" + addr + " | Ctrl+C to stop")
  s := http.Server{Handler: b.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
  ctx,stop:=signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM);defer stop()

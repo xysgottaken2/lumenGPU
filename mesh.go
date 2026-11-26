@@ -10,16 +10,22 @@ import (
 )
 const meshMaxVertices=60000
 const meshTotalVertices=1500000
-type MeshUpload struct { ID uint32 `json:"id"`; Vertices []V `json:"vertices"` }
+type MeshUpload struct { ID uint32 `json:"id"`; Vertices []V `json:"vertices"`; UVs []UV `json:"uvs,omitempty"` }
 func meshID(id uint32) bool {return id>=3&&id<=16777215}
 func meshValid(m MeshUpload) bool {
  if !meshID(m.ID)||len(m.Vertices)<3||len(m.Vertices)>meshMaxVertices||len(m.Vertices)%3!=0{return false}
  for _,v:=range m.Vertices {if !vec(v)||math.Abs(v[0])>100||math.Abs(v[1])>100||math.Abs(v[2])>100{return false}}
+ if len(m.UVs)!=0&&len(m.UVs)!=len(m.Vertices){return false};for _,uv:=range m.UVs{if !validUV(uv){return false}}
  return true
 }
 func meshPacket(vs []V) []byte {
  out:=make([]byte,8+len(vs)*12);copy(out,"LGM1");binary.LittleEndian.PutUint32(out[4:],uint32(len(vs)))
  at:=8;for _,v:=range vs{for _,x:=range v{binary.LittleEndian.PutUint32(out[at:],math.Float32bits(float32(x)));at+=4}}
+ return out
+}
+func texturedMeshPacket(vs []V,uv []UV)[]byte{
+ out:=meshPacket(vs);if len(uv)!=len(vs){return out};copy(out,"LGM2")
+ for _,v:=range uv{for _,x:=range v{out=binary.LittleEndian.AppendUint32(out,math.Float32bits(float32(x)))}}
  return out
 }
 func (b *Bridge) meshHandler(w http.ResponseWriter,r *http.Request){
@@ -32,16 +38,17 @@ func (b *Bridge) meshHandler(w http.ResponseWriter,r *http.Request){
   if old,ok:=b.meshes[m.ID];ok{
    if len(old)!=len(m.Vertices){http.Error(w,"mesh ID collision",409);return}
    for i:=range old{if old[i]!=m.Vertices[i]{http.Error(w,"mesh ID collision",409);return}}
+   oldUV:=b.meshUV[m.ID];if len(oldUV)!=len(m.UVs){http.Error(w,"mesh UV collision",409);return};for i:=range oldUV{if oldUV[i]!=m.UVs[i]{http.Error(w,"mesh UV collision",409);return}}
    w.WriteHeader(204);return
   }
   if len(b.meshes)>=256||b.meshVertices+len(m.Vertices)>meshTotalVertices{http.Error(w,"mesh cache full",413);return}
   if b.meshes==nil{b.meshes=make(map[uint32][]V)}
-  b.meshes[m.ID]=m.Vertices;b.meshVertices+=len(m.Vertices);w.WriteHeader(204)
+  if b.meshUV==nil{b.meshUV=map[uint32][]UV{}};b.meshUV[m.ID]=m.UVs;b.meshes[m.ID]=m.Vertices;b.meshVertices+=len(m.Vertices);w.WriteHeader(204)
  case "GET":
   id,err:=strconv.ParseUint(r.URL.Query().Get("id"),10,32);if err!=nil||!meshID(uint32(id)){http.Error(w,"invalid id",400);return}
-  b.mu.RLock();vs,ok:=b.meshes[uint32(id)];b.mu.RUnlock()
+  b.mu.RLock();vs,ok:=b.meshes[uint32(id)];uv:=b.meshUV[uint32(id)];b.mu.RUnlock()
   if !ok{http.NotFound(w,r);return}
-  w.Header().Set("Content-Type","application/octet-stream");w.Header().Set("Cache-Control","no-store");w.Write(meshPacket(vs))
+  w.Header().Set("Content-Type","application/octet-stream");w.Header().Set("Cache-Control","no-store");w.Write(texturedMeshPacket(vs,uv))
  default:http.Error(w,"method",405)
  }
 }
