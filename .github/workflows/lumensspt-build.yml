@@ -1,0 +1,64 @@
+name: Build LumenSSPT Windows x64
+on:
+  push:
+    branches: [lumensspt-v0.1]
+    paths:
+      - 'LumenSSPT/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Locate DXC and compile native worker
+        shell: pwsh
+        working-directory: LumenSSPT
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+          $dxc = Get-Command dxc.exe -ErrorAction SilentlyContinue
+          if (-not $dxc) {
+            $dxc = Get-ChildItem "$sdk\*\x64\dxc.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+            if ($dxc) { $env:PATH = "$($dxc.DirectoryName);$env:PATH" }
+          }
+          if (-not (Get-Command dxc.exe -ErrorAction SilentlyContinue)) {
+            $release = Invoke-RestMethod 'https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest'
+            $asset = $release.assets | Where-Object { $_.name -match '^dxc_.*\.zip$' } | Select-Object -First 1
+            if (-not $asset) { throw 'Official DXC release ZIP not found' }
+            $zip = Join-Path $env:RUNNER_TEMP 'dxc.zip'
+            $target = Join-Path $env:RUNNER_TEMP 'dxc'
+            Invoke-WebRequest $asset.browser_download_url -OutFile $zip
+            Expand-Archive $zip $target -Force
+            $exe = Get-ChildItem $target -Recurse -Filter dxc.exe | Where-Object { $_.Directory.Name -eq 'x64' } | Select-Object -First 1
+            if (-not $exe) { throw 'x64 DXC executable missing from official package' }
+            $env:PATH = "$($exe.DirectoryName);$env:PATH"
+          }
+          Get-Command dxc.exe
+          ./Build.ps1
+          if (-not (Test-Path build/LumenSSPT.exe) -or -not (Test-Path build/trace.cso)) { throw 'Build outputs missing' }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check CPU-side Python tests
+        shell: pwsh
+        working-directory: LumenSSPT
+        run: |
+          python -m pip install numpy opencv-python
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest -v test_cpu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Package prebuilt version
+        shell: pwsh
+        working-directory: LumenSSPT
+        run: |
+          New-Item -ItemType Directory -Force dist/build | Out-Null
+          Copy-Item build/LumenSSPT.exe,build/trace.cso dist/build/
+          Copy-Item app.py,requirements.txt,Setup.ps1,Launch.bat,Demo.bat,README.md dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LumenSSPT-v0.1-Windows-x64
+          path: LumenSSPT/dist/
+          if-no-files-found: error
