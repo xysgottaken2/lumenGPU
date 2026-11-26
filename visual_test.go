@@ -17,3 +17,8 @@ func TestClothingWire(t *testing.T){
  b:=nativePacket(State{Parts:[]Part{p}});if len(b)!=296||string(b[:4])!="LGC4"||math.Float32frombits(binary.LittleEndian.Uint32(b[264:]))!=1{t.Fatal("clothing wire")}
  p.Cloth[5]=.8;if validCloth(p.Cloth){t.Fatal("invalid atlas span accepted")};p.Cloth[5]=.4;p.Cloth[0]=129;if validCloth(p.Cloth){t.Fatal("invalid slot accepted")}
 }
+
+func TestParticleMetadata(t *testing.T){
+ a:=[8]float64{0,0,0,0,.5,0,4,.75}
+ if !validExtra(a){t.Fatal("valid particle rejected")};a[7]=-.1;if validExtra(a){t.Fatal("negative opacity accepted")};a[7]=1;a[6]=5;if validExtra(a){t.Fatal("unknown marker accepted")}
+}

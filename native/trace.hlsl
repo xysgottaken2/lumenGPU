@@ -167,7 +167,7 @@ float3 visibleSun(float3 d){
  return linearColor(c.xyz)*c.w*sunTint()*20*sunPower();
 }
 RayDesc ray(float3 o,float3 d,float limit){RayDesc r;r.Origin=o;r.Direction=d;r.TMin=.001;r.TMax=limit;return r;}
-bool blocked(float3 o,float3 d,float limit){RayQuery<RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;q.TraceRayInline(scene,RAY_FLAG_NONE,255,ray(o,d,limit));while(q.Proceed()){}return q.CommittedStatus()==COMMITTED_TRIANGLE_HIT;}
+bool blocked(float3 o,float3 d,float limit){RayQuery<RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;q.TraceRayInline(scene,RAY_FLAG_NONE,3u,ray(o,d,limit));while(q.Proceed()){}return q.CommittedStatus()==COMMITTED_TRIANGLE_HIT;}
 // Straight-line colored shadow transmission. Each boundary contributes
 // sqrt(tint * transmission), so a closed pane applies its tint once.
 // This is thin-glass visibility, not refracted caustic transport.
@@ -178,7 +178,7 @@ float3 lightVisibilityTo(float3 o,float3 d,float limit){
  [loop]for(uint layer=0;layer<16;++layer){
   if(remaining<=.001)return visibility;
   RayQuery<RAY_FLAG_FORCE_OPAQUE> q;
-  q.TraceRayInline(scene,RAY_FLAG_NONE,255,ray(o,d,remaining));
+  q.TraceRayInline(scene,RAY_FLAG_NONE,3u,ray(o,d,remaining));
   while(q.Proceed()){}
   if(q.CommittedStatus()!=COMMITTED_TRIANGLE_HIT)return visibility;
   Material m=mats[q.CommittedInstanceID()];
@@ -324,6 +324,30 @@ float4 waveRead(uint idx,int pass){if(pass==0)return history[idx];if(pass%2==1)r
  float4 result=float4(sum/max(weights,1e-6),1);if(pass%2==0)waveA[idx]=result;else waveB[idx]=result;
 }
 float3 resolveSample(uint idx){if(environment.w>=0){int pass=int(environment.w);return pass%2==0?waveA[idx].rgb:waveB[idx].rgb;}return history[idx].rgb;}
+float3 compositeParticles(float3 c,float3 d,float surfaceDepth){
+ // Camera-only sprites: no extra rays when the scene has no active particles.
+ if(forward.w<=0)return c;
+ float limit=surfaceDepth>0?min(quality.x,surfaceDepth):quality.x;
+ float3 o=eye.xyz,overlay=0;float remaining=1;float travelled=0;
+ [loop]for(uint layer=0;layer<8;++layer){
+  if(limit-travelled<=.001||remaining<.005)break;
+  RayQuery<RAY_FLAG_FORCE_OPAQUE> q;
+  q.TraceRayInline(scene,RAY_FLAG_NONE,4u,ray(o,d,limit-travelled));
+  while(q.Proceed()){}
+  if(q.CommittedStatus()!=COMMITTED_TRIANGLE_HIT)break;
+  Material m=mats[q.CommittedInstanceID()];
+  float3 localP=q.CommittedObjectRayOrigin()+q.CommittedObjectRayDirection()*q.CommittedRayT();
+  float2 uv=float2(localP.x,-localP.y)+.5;
+  float4 tex=float4(1,1,1,1-smoothstep(.12,.5,length(uv-.5)));
+  if(m.tex0.x>0)tex=assetSampleLod(uint(m.tex0.x),uv,false,-2.);
+  float alpha=saturate(tex.a*m.extra1.w);
+  float3 tint=linearColor(tex.rgb)*linearColor(m.colorMetal.xyz)*max(.1,m.roughEmit.y);
+  float additive=saturate(m.extra1.x);
+  overlay+=remaining*alpha*tint;remaining*=1-alpha*(1-additive);
+  float advance=q.CommittedRayT()+.001;o+=d*advance;travelled+=advance;
+ }
+ return c*remaining+overlay;
+}
 [numthreads(8,8,1)]void resolve(uint3 id:SV_DispatchThreadID){
  uint w=uint(dims.x),h=uint(dims.y),ow=uint(display.x),oh=uint(display.y);if(id.x>=ow||id.y>=oh)return;
  float2 pos=(float2(id.xy)+.5)*float2(w,h)/float2(ow,oh)-.5;int2 center=clamp(int2(floor(pos+.5)),int2(0,0),int2(w-1,h-1));uint idx=center.y*w+center.x;
@@ -339,5 +363,6 @@ float3 resolveSample(uint idx){if(environment.w>=0){int pass=int(environment.w);
   [unroll]for(int i=0;i<4;++i){float3 v=resolveSample(ids[i]);float wt=weights[i];if(right.w>.5)wt*=max(.001,weightGuide(guides[idx],albedos[idx],guides[ids[i]],albedos[ids[i]]));sum+=v*wt;total+=wt;lo=min(lo,v);hi=max(hi,v);}
   float3 filtered=sum/max(total,1e-5);c=right.w>.5?clamp(filtered+(c-filtered)*up.w,lo,hi):filtered;
  }
+ if(forward.w>0){float2 uv=(float2(id.xy)+.5)/float2(ow,oh)*2-1;float3 dir=normalize(forward.xyz+right.xyz*uv.x*eye.w*display.x/display.y-up.xyz*uv.y*eye.w);c=compositeParticles(c,dir,guides[idx].w);}
  c*=exp2(options.z);if(switches.w==0)c=saturate(c*(2.51*c+.03)/(c*(2.43*c+.59)+.14));else if(switches.w==1)c=c/(1+c);else c=saturate(c);output[id.xy]=float4(pow(saturate(c),1/2.2),1);
 }

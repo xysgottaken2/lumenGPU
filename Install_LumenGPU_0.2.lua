@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.9.4b)')
+print('[LumenGPU] Client starting (0.9.5)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -369,6 +369,10 @@ local function extraMaterial(obj,tex)
     local packed=0
     if obj:IsA('Part') or obj:IsA('SpawnLocation') then
         for i,k in surfaceNames do packed+=(surfaceKinds[obj[k]] or 0)*4^(i-1) end
+    end
+    local hum=obj.Parent and obj.Parent:FindFirstChildOfClass('Humanoid')
+    if hum and hum.RigType==Enum.HumanoidRigType.R6 then
+        for _,name in bodyNames do if obj.Name==name then packed=0;break end end
     end
     local n,r,m=0,0,0
     local surface=obj:FindFirstChildOfClass('SurfaceAppearance')
@@ -763,6 +767,142 @@ task.spawn(function()
         task.wait(.1)
     end
 end)
+-- Local particle preview. Roblox does not expose its individual live particles;
+-- approximate continuous emission using public emitter properties, with strict bounds.
+local particleLimit=64
+local emitterLimit=24
+local emitterSet={}
+local emitterState={}
+local nearbyEmitters={}
+local particleRandom=Random.new()
+local function trackEmitter(o)
+    if o:IsA('ParticleEmitter') then emitterSet[o]=true end
+end
+task.defer(function()
+    for i,o in workspace:GetDescendants() do trackEmitter(o);if i%256==0 then task.wait() end end
+end)
+workspace.DescendantAdded:Connect(trackEmitter)
+workspace.DescendantRemoving:Connect(function(o)
+    if emitterSet[o] then emitterSet[o]=nil;emitterState[o]=nil end
+end)
+local function emitterFrame(e)
+    local parent=e.Parent
+    if not parent then return nil,nil end
+    if parent:IsA('Attachment') then return parent.WorldCFrame,parent:FindFirstAncestorWhichIsA('BasePart') end
+    if parent:IsA('BasePart') and not parent:IsA('Terrain') then return parent.CFrame,parent end
+    return nil,nil
+end
+local function chooseEmitters(cam)
+    local candidates={}
+    for e in emitterSet do
+        local cf=emitterFrame(e)
+        if cf then
+            local dist=(cf.Position-cam.CFrame.Position).Magnitude
+            if dist<=200 and (e.Enabled or emitterState[e]) then candidates[#candidates+1]={e=e,d=dist} end
+        end
+    end
+    table.sort(candidates,function(a,b)return a.d<b.d end)
+    local keep={}
+    nearbyEmitters={}
+    for i=1,math.min(#candidates,emitterLimit) do
+        local e=candidates[i].e;nearbyEmitters[#nearbyEmitters+1]=e;keep[e]=true
+    end
+    for e in emitterState do if not keep[e] then emitterState[e]=nil end end
+end
+local function sampleSequence(seq,t)
+    local points=seq.Keypoints
+    for i=2,#points do
+        local a,b=points[i-1],points[i]
+        if t<=b.Time then
+            local u=math.clamp((t-a.Time)/math.max(.00001,b.Time-a.Time),0,1)
+            if typeof(a.Value)=='Color3' then return a.Value:Lerp(b.Value,u) end
+            return a.Value+(b.Value-a.Value)*u
+        end
+    end
+    return points[#points].Value
+end
+local function rangeValue(r)
+    return r.Min+(r.Max-r.Min)*particleRandom:NextNumber()
+end
+local lastEmitterScan=-100
+local particleRows={}
+local function simulateParticles(dt)
+    local cam=workspace.CurrentCamera
+    if not cam or workspace:GetAttribute('LumenParticlesEnabled')==false then particleRows={};return end
+    if os.clock()-lastEmitterScan>.5 then lastEmitterScan=os.clock();chooseEmitters(cam) end
+    local rows={}
+    local budget=particleLimit
+    for _,e in nearbyEmitters do
+        local cf,parent=emitterFrame(e)
+        if cf and e:IsDescendantOf(workspace) then
+            local state=emitterState[e]
+            if not state then state={credit=0,particles={},lastCF=cf};emitterState[e]=state end
+            local list=state.particles
+            for i=#list,1,-1 do
+                local p=list[i];p.age+=dt
+                if p.age>=p.life then table.remove(list,i)
+                else
+                    if e.LockedToPart then
+                        p.pos=cf:PointToWorldSpace(state.lastCF:PointToObjectSpace(p.pos))
+                        p.vel=cf:VectorToWorldSpace(state.lastCF:VectorToObjectSpace(p.vel))
+                    end
+                    p.vel=p.vel*2^(-math.clamp(e.Drag,-4,40)*dt)+e.Acceleration*dt
+                    if p.vel.Magnitude>500 then p.vel=p.vel.Unit*500 end
+                    p.pos+=p.vel*dt
+                    p.rot+=p.spin*dt
+                end
+            end
+            state.lastCF=cf
+            if e.Enabled then
+                state.credit+=math.clamp(e.Rate,0,120)*dt
+                local spawn=math.min(math.floor(state.credit),8)
+                state.credit-=math.floor(state.credit)
+                local cap=math.max(1,math.min(16,math.floor(particleLimit/math.max(1,#nearbyEmitters))))
+                for _=1,math.min(spawn,math.max(0,cap-#list)) do
+                    local localDir=Vector3.FromNormalId(e.EmissionDirection)
+                    local basis=CFrame.lookAt(Vector3.zero,localDir,math.abs(localDir.Y)>.99 and Vector3.xAxis or Vector3.yAxis)
+                    local spread=e.SpreadAngle
+                    local tilt=CFrame.Angles(math.rad(particleRandom:NextNumber(-1,1)*spread.X*.5),math.rad(particleRandom:NextNumber(-1,1)*spread.Y*.5),0)
+                    local vel=cf:VectorToWorldSpace((basis*tilt).LookVector)*rangeValue(e.Speed)
+                    if parent then vel+=parent.AssemblyLinearVelocity*e.VelocityInheritance end
+                    local pos=cf.Position
+                    if e.Parent:IsA('BasePart') then
+                        local sz=e.Parent.Size
+                        pos=cf:PointToWorldSpace(Vector3.new(particleRandom:NextNumber(-.5,.5)*sz.X,particleRandom:NextNumber(-.5,.5)*sz.Y,particleRandom:NextNumber(-.5,.5)*sz.Z))
+                    end
+                    list[#list+1]={pos=pos,vel=vel,age=0,life=math.clamp(rangeValue(e.Lifetime),.03,20),rot=math.rad(rangeValue(e.Rotation)),spin=math.rad(rangeValue(e.RotSpeed))}
+                end
+            else state.credit=0 end
+            local slot=discoverImage(e.Texture)
+            for _,p in list do
+                if budget<=0 then break end
+                local age=math.clamp(p.age/p.life,0,1)
+                local size=math.clamp(sampleSequence(e.Size,age),0,100)
+                local alpha=math.clamp(1-sampleSequence(e.Transparency,age),0,1)
+                local delta=cam.CFrame.Position-p.pos
+                if size>.015 and alpha>.01 and delta.Magnitude>.04 and delta.Magnitude<250 then
+                    local c=sampleSequence(e.Color,age)
+                    local up=cam.CFrame.UpVector
+                    if math.abs(delta.Unit:Dot(up))>.999 then up=cam.CFrame.RightVector end
+                    local billboard=CFrame.lookAt(p.pos,cam.CFrame.Position,up)*CFrame.Angles(0,0,-p.rot)
+                    rows[#rows+1]={p=vec(p.pos),r=vec(billboard.RightVector),u=vec(billboard.UpVector),b=vec(billboard.ZVector),s={size,size,1},c={c.R,c.G,c.B},shape=0,metal=0,rough=1,emit=math.clamp(e.Brightness,0,8),transmission=0,ior=1.5,specular=0,emissionColor={0,0,0},tex=slot>0 and {slot,0,1,1,0,0,1,0} or nil,extra={0,0,0,0,math.clamp(e.LightEmission,0,1),0,4,alpha}}
+                    budget-=1
+                end
+            end
+        end
+    end
+    particleRows=rows
+end
+task.spawn(function()
+    local last=os.clock()
+    while task.wait(1/30) do
+        local now=os.clock();local dt=math.clamp(now-last,0,.1);last=now
+        if active then
+            local ok,err=pcall(simulateParticles,dt)
+            if not ok then particleRows={};if now-lastEmitterScan>2 then warn('[LumenGPU] Particles: '..tostring(err)) end end
+        else emitterState={};nearbyEmitters={};particleRows={};lastEmitterScan=-100 end
+    end
+end)
 -- Only traverse moving objects here; the camera loop never scans the world.
 local cachedMoving={}
 task.spawn(function()
@@ -779,7 +919,10 @@ task.spawn(function()
     end
 end)
 local function fastSnapshot()
-    return cachedMoving
+    if #particleRows==0 then return cachedMoving end
+    local rows=table.clone(cachedMoving)
+    for _,row in particleRows do if #rows>=1024 then break end;rows[#rows+1]=row end
+    return rows
 end
 local function toggle()
     active=not active
@@ -907,7 +1050,10 @@ end)
 player.CharacterAdded:Connect(function()
     if external then disableDefaultControls() end
 end)
-print('[LumenGPU] Press P to toggle local scene streaming')
+task.defer(function()
+    if not active and workspace:GetAttribute('LumenAutoStart')~=false then toggle() end
+end)
+print('[LumenGPU] Auto-start enabled by default; P toggles local scene streaming')
 ]====])
 make(ss,'Script','LumenGPU_Server',[====[
 local RunService=game:GetService('RunService')
@@ -1129,4 +1275,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.9.4b Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.9.5 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')
