@@ -148,8 +148,13 @@ func(l *Lumenus)process(a assetRequest)assetResult{
   b:=l.bridge;b.mu.Lock();if b.textures==nil{b.textures=map[uint32][]uint32{}};b.textures[a.ID]=pixels;b.mu.Unlock()
   return assetResult{Status:"ready",Detail:"texture pixels ready for renderer"}
  }
- vs,size,e:=decodeLumenMesh(data);if e!=nil{return assetResult{Status:"failed",Detail:meshDiagnostic(data,e)}}
- uv:=decodeLumenUV(data,len(vs));m:=MeshUpload{ID:a.ID,Vertices:vs,UVs:uv};if !meshValid(m){return assetResult{Status:"failed",Detail:"invalid normalized mesh"}}
+ decoded:=data
+ if bytes.HasPrefix(data,[]byte("version 7.00\n")){
+  decoded,e=chunkMeshWithDecoder(data,func(chunk []byte)([]byte,error){return runDraco(l.ctx,dracoHelper(),chunk)})
+  if e!=nil{return assetResult{Status:"failed",Detail:meshDiagnostic(data,e)}}
+ }
+ vs,size,e:=decodeLumenMesh(decoded);if e!=nil{return assetResult{Status:"failed",Detail:meshDiagnostic(data,e)}}
+ uv:=decodeLumenUV(decoded,len(vs));m:=MeshUpload{ID:a.ID,Vertices:vs,UVs:uv};if !meshValid(m){return assetResult{Status:"failed",Detail:"invalid normalized mesh"}}
  b:=l.bridge;b.mu.Lock();defer b.mu.Unlock()
  if _,ok:=b.meshes[a.ID];ok||len(b.meshes)>=256||b.meshVertices+len(vs)>meshTotalVertices{return assetResult{Status:"failed",Detail:"mesh ID collision or cache full"}}
  if !cached {if e=os.WriteFile(cachePath,data,0600);e!=nil{return assetResult{Status:"failed",Detail:"cache write failed"}}};if b.meshes==nil{b.meshes=map[uint32][]V{}};if b.meshUV==nil{b.meshUV=map[uint32][]UV{}};b.meshUV[a.ID]=uv;b.meshes[a.ID]=vs;b.meshVertices+=len(vs)

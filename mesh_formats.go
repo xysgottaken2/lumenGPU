@@ -7,7 +7,8 @@ func meshDiagnostic(d []byte,e error)string{
 func makeV2(verts,faces []byte,nv,nf int)[]byte{
  out:=[]byte("version 2.00\n");h:=make([]byte,12);binary.LittleEndian.PutUint16(h,12);h[2]=40;h[3]=12;binary.LittleEndian.PutUint32(h[4:],uint32(nv));binary.LittleEndian.PutUint32(h[8:],uint32(nf));out=append(out,h...);out=append(out,verts...);return append(out,faces...)
 }
-func chunkMeshToV2(data []byte)([]byte,error){
+func chunkMeshToV2(data []byte)([]byte,error){return chunkMeshWithDecoder(data,nil)}
+func chunkMeshWithDecoder(data []byte,draco func([]byte)([]byte,error))([]byte,error){
  fail:=func(s string)([]byte,error){return nil,fmt.Errorf("chunk mesh: %s",s)}
  i:=bytes.IndexByte(data,'\n');if i<0{return fail("missing header")};d:=data[i+1:]
  var core,lods []byte
@@ -15,7 +16,13 @@ func chunkMeshToV2(data []byte)([]byte,error){
   if len(d)<16{return fail("truncated chunk header")}
   name:=strings.TrimRight(string(d[:8]),"\x00");version:=binary.LittleEndian.Uint32(d[8:]);size:=int(binary.LittleEndian.Uint32(d[12:]));d=d[16:]
   if size<0||size>len(d){return fail("truncated chunk")}
-  if name=="COREMESH"{if version==2{return fail("Draco COREMESH v2 not implemented")};if version!=1||core!=nil{return fail("unsupported or duplicate COREMESH")};core=d[:size]}
+  if name=="COREMESH"{
+   if core!=nil{return fail("duplicate COREMESH")}
+   switch version{case 1:core=d[:size];case 2:
+    if draco==nil{return fail("Draco COREMESH requires the native decoder")}
+    var e error;core,e=draco(d[:size]);if e!=nil{return nil,e}
+   default:return fail("unsupported COREMESH version")}
+  }
   if name=="LODS"&&version==1{lods=d[:size]}
   d=d[size:]
  }

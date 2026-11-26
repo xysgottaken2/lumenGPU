@@ -16,7 +16,7 @@ jobs:
   build:
     needs: studio-syntax
     runs-on: windows-2022
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -35,8 +35,14 @@ jobs:
       - name: Build native renderer and shader
         shell: pwsh
         run: ./Build-Windows.ps1
+      - name: Test Draco end-to-end through Go bridge
+        shell: pwsh
+        run: |
+          $env:LUMEN_DRACO_TEST_EXE = (Resolve-Path dist/LumenDraco.exe).Path
+          go test -run TestDraco -v ./...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
-          name: LumenGPU-0.9.2-Lumenus-Windows-x64
+          name: LumenGPU-0.9.2a-Lumenus-Windows-x64
           path: dist/
           if-no-files-found: error

@@ -243,7 +243,7 @@ func main() {
  b.lumenus=worker
  defer worker.close()
  if len(os.Args)>1&&os.Args[1]=="--connect" {ctx,cancel:=signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM);session,e:=configureOAuth(ctx);cancel();if e!=nil{log.Printf("[Lumenus] Authorization failed: %v; continuing with local imports/API key",e)}else{worker.oauth=session;log.Println("[Lumenus] Roblox authorization successful (session only)")}}else if worker.key==""{log.Println("[Lumenus] Local-only mode. Run Connect-Roblox.bat for Roblox account authorization.")}
- fmt.Println("LUMEN GPU 0.9.2 | Lumenus session cache:",worker.dir)
+ fmt.Println("LUMEN GPU 0.9.2a | Lumenus session cache:",worker.dir)
  fmt.Println("Native bridge at http://" + addr + " | Ctrl+C to stop")
  s := http.Server{Handler: b.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
  ctx,stop:=signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM);defer stop()
