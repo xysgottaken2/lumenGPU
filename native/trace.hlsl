@@ -51,7 +51,7 @@ float3 bumpNormal(float3 n,float3 t,float3 b,float2 grad){
 float luma(float3 c){return dot(c,float3(.2126,.7152,.0722));}
 void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,inout float3 n,out float3 c,inout float rough,inout float metal){
  c=linearColor(m.colorMetal.xyz);float2 uv;
- bool hasUV=materialUV(m,primitive,lp,bary);
+ bool hasUV=materialUV(m,primitive,lp,bary,uv);
  float3 t=m.ax.xyz,b=m.az.xyz;
  if(shape==3){uint at=uint(m.ay.w)+primitive*6;t=tangentWorld(m,meshNormals[at+4]);b=tangentWorld(m,meshNormals[at+5]);}
  else if(shape==0){
@@ -251,7 +251,7 @@ float lum(float3 c){return dot(c,float3(.2126,.7152,.0722));}
 float4 waveRead(uint idx,int pass){if(pass==0)return history[idx];if(pass%2==1)return waveA[idx];return waveB[idx];}
 [numthreads(8,8,1)]void wavelet(uint3 id:SV_DispatchThreadID){
  uint w=uint(dims.x),h=uint(dims.y);if(id.x>=w||id.y>=h)return;
- uint idx=id.y*w+id.x;int pass=int(environment.w),stride=1<<pass;
+ uint idx=id.y*w+id.x;int pass=int(environment.w),stride=int(1u<<uint(pass));
  float4 g=guides[idx],a=albedos[idx],center=waveRead(idx,pass);
  float3 sum=0;float weights=0;
  float sigma=max(.04,display.z*.85*(.1+sqrt(max(.0,lum(center.rgb)))));
