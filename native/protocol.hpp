@@ -6,7 +6,7 @@
 #include <stdexcept>
 struct V { float x,y,z; float operator[](int i) const { return i==0?x:i==1?y:z; } };
 struct Part { V p,r,u,b,s,c; float metal,rough,emit,transmission=0,ior=1.5f,shape=0,specular=1; V emissionColor{0,0,0}; };
-struct Scene { uint64_t revision=0,seq=0; V p,r,u,f; float fov; V sun; std::vector<Part> parts; };
+struct Scene { uint64_t revision=0,seq=0; V p,r,u,f; float fov; V sun; std::vector<Part> parts; size_t characterCount=0; uint64_t poseRevision=0; };
 static_assert(sizeof(V)==12 && sizeof(Part)==112);
 // A box proxy can enclose the camera even when its source mesh does not.
 // Keep transmissive volumes, since the camera can legitimately be inside glass.

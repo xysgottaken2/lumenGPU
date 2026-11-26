@@ -56,3 +56,30 @@ func(b *Bridge)inputStream(w http.ResponseWriter,r *http.Request){
   var v Control;if json.Unmarshal(data,&v)!=nil||!validControl(v){return};b.storeControl(v)
  }
 }
+
+// V0.7: pose and view are captured under one lock. Static/moving world
+// changes have independent revisions; character motion never resends the map.
+func(b *Bridge)splitState(channel int)(State,uint64){
+ b.mu.RLock();defer b.mu.RUnlock()
+ s:=b.state
+ switch channel{
+ case 0:s.Parts=b.characterParts;s.Scene=b.characterRevision;return s,s.Seq
+ case 1:s.Parts=b.worldParts;s.Scene=b.worldRevision;return s,s.Scene
+ default:s.Parts=b.avatarParts;s.Scene=b.movingRevision;return s,s.Scene
+ }
+}
+func(b *Bridge)nativeSplitStream(w http.ResponseWriter,r *http.Request,channel int){
+ c,err:=localUpgrade.Upgrade(w,r,nil);if err!=nil{return};defer c.Close()
+ tick:=time.NewTicker(4*time.Millisecond);defer tick.Stop()
+ last:=^uint64(0);lastSend:=time.Time{}
+ for range tick.C{
+  s,rev:=b.splitState(channel)
+  if rev==last&&time.Since(lastSend)<250*time.Millisecond{continue}
+  // First/change packet contains full channel snapshot. Unchanged heartbeat is empty.
+  // The native receiver ignores repeated revision keys.
+  if rev==last{s.Parts=nil}
+  c.SetWriteDeadline(time.Now().Add(time.Second))
+  if c.WriteMessage(websocket.BinaryMessage,nativePacket(s))!=nil{return}
+  last=rev;lastSend=time.Now()
+ }
+}

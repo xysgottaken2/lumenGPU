@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.6.2)')
+print('[LumenGPU] Client starting (0.7)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -330,9 +330,7 @@ task.spawn(function()
     end
 end)
 local function fastSnapshot()
-    local rows=avatarSnapshot()
-    for _,part in cachedMoving do if #rows<1024 then rows[#rows+1]=part end end
-    return rows
+    return cachedMoving
 end
 local function toggle()
     active=not active
@@ -380,7 +378,8 @@ RunService:BindToRenderStep('LumenGPU_ExternalCamera',Enum.RenderPriority.Camera
     local cam=workspace.CurrentCamera;if not cam then return end
     local c=cam.CFrame;local fast=nil
     if fastElapsed>=1/30 then fastElapsed=fastElapsed%(1/30);fast=fastSnapshot() end
-    remote:FireServer('camera',{p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),f=vec(c.LookVector),fov=cam.FieldOfView},fast)
+    -- Character and camera are sampled during the same render step.
+    remote:FireServer('camera',{p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),f=vec(c.LookVector),fov=cam.FieldOfView},avatarSnapshot(),fast)
 end)
 RunService.Heartbeat:Connect(function()
     if not active then return end
@@ -401,7 +400,9 @@ local Lighting=game:GetService('Lighting')
 local Players=game:GetService('Players')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera')
 local owner,latest=nil,nil
-local latestAvatar={}
+local latestAvatar={} -- other moving objects
+local latestCharacter={}
+local cameraSerial=0;local sentCamera=-1;local cameraSentAt=0
 local avatarSerial=0;local sentAvatar=-1
 local latestWorld=nil
 local worldSerial=0
@@ -416,7 +417,7 @@ local cameraRetry=0;local geometryRetry=0
 local outstanding=0;local lastCameraAck=0
 local geometryPending=nil
 local function closeCamera()
- local old=cameraWS;cameraWS=nil;cameraOpen=false;outstanding=0
+ local old=cameraWS;cameraWS=nil;cameraOpen=false;outstanding=0;sentCamera=-1
  if old then pcall(function() old:Close() end) end
 end
 local function closeGeometry()
@@ -430,7 +431,7 @@ local function connectCamera()
  local ok,c=pcall(function() return HTTP:CreateWebStreamClient(Enum.WebStreamClientType.WebSocket,{Url='ws://127.0.0.1:8765/api/ws'}) end)
  if not ok or not c then return end
  cameraWS=c
- local function opened() if cameraWS==c then cameraOpen=true;outstanding=0;lastCameraAck=os.clock() end end
+ local function opened() if cameraWS==c then cameraOpen=true;outstanding=0;sentCamera=-1;lastCameraAck=os.clock() end end
  c.Opened:Connect(opened)
  c.MessageReceived:Connect(function(msg)
   if cameraWS~=c or not owner then return end
@@ -465,9 +466,9 @@ local function connectGeometry()
  task.delay(3,function() if geometryWS==c and not geometryOpen then failed() end end)
 end
 local function vec(v) return {v.X,v.Y,v.Z} end
-remote.OnServerEvent:Connect(function(player,cmd,data,avatar)
+remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
     if cmd=='start' and (not owner or owner==player) then
-        if not owner then owner=player; latest=nil; latestAvatar={};avatarSerial=0;sentAvatar=-1; latestWorld=nil;worldSerial=0;pending=nil;lastSnapshot=-100; lastPartsJSON=nil; print('[LumenGPU] Local bridge started') end
+        if not owner then owner=player; latest=nil; latestAvatar={};latestCharacter={};cameraSerial=0;sentCamera=-1;avatarSerial=0;sentAvatar=-1; latestWorld=nil;worldSerial=0;pending=nil;lastSnapshot=-100; lastPartsJSON=nil; print('[LumenGPU] Local bridge started') end
         remote:FireClient(player,'status','Waiting for HTTP')
     elseif cmd=='stop' and owner==player then owner=nil; latest=nil;pending=nil;closeWS()
     elseif cmd=='meshBegin' and owner==player then
@@ -492,7 +493,10 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar)
     elseif cmd=='worldEnd' and owner==player and pending and data==pending.serial then
         if #pending.rows==pending.count then latestWorld=pending.rows;worldSerial=pending.serial;print('[LumenGPU] Accepted client world '..worldSerial..': '..#latestWorld..' static parts') end;pending=nil
     elseif cmd=='camera' and owner==player and type(data)=='table' then
-        if type(data.p)=='table' and #data.p==3 and type(data.r)=='table' and #data.r==3 and type(data.u)=='table' and #data.u==3 and type(data.f)=='table' and #data.f==3 and type(data.fov)=='number' then latest=data; if type(avatar)=='table' and #avatar<=1024 then latestAvatar=avatar;avatarSerial+=1 end end
+        if type(data.p)=='table' and #data.p==3 and type(data.r)=='table' and #data.r==3 and type(data.u)=='table' and #data.u==3 and type(data.f)=='table' and #data.f==3 and type(data.fov)=='number' then
+            if type(avatar)=='table' and #avatar<=64 then latest=data;latestCharacter=avatar;cameraSerial+=1 end
+            if type(moving)=='table' and #moving<=1024 then latestAvatar=moving;avatarSerial+=1 end
+        end
     end
 end)
 Players.PlayerRemoving:Connect(function(p) if p==owner then owner=nil; latest=nil;closeWS() end end)
@@ -509,14 +513,17 @@ task.spawn(function()
     if cameraOpen then
      if outstanding>0 and now-lastCameraAck>.75 then closeCamera();return end
      if outstanding>=4 then return end
-     local payload=HTTP:JSONEncode({camera=latest,sun=vec(Lighting:GetSunDirection())})
+     if sentCamera==cameraSerial and now-cameraSentAt<.1 then return end
+     local serial=cameraSerial
+     local payload=HTTP:JSONEncode({camera=latest,character=latestCharacter,sun=vec(Lighting:GetSunDirection())})
      outstanding+=1
      local sent,e=pcall(function() cameraWS:Send(payload) end)
      if not sent then closeCamera();error(e) end
+     sentCamera=serial;cameraSentAt=now
     elseif now-lastHTTP>=.15 then
      -- Compatibility fallback retains geometry when both sockets are unavailable.
      lastHTTP=now
-     local update={camera=latest,sun=vec(Lighting:GetSunDirection())}
+     local update={camera=latest,character=latestCharacter,sun=vec(Lighting:GetSunDirection())}
      -- Geometry fallback is owned by the independent geometry task.
      local res=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/update-controls',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode(update)})
      if not res.Success then error('HTTP '..res.StatusCode) end
@@ -559,4 +566,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.6.2 continuous movement hotfix installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.7 synchronized avatar installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')

@@ -45,6 +45,7 @@ type Update struct {
 	Sun    V       `json:"sun"`
 	Parts  *[]Part `json:"parts,omitempty"`
  Avatar *[]Part `json:"avatar,omitempty"`
+ Character *[]Part `json:"character,omitempty"`
 }
 type State struct {
 	Camera   Camera `json:"camera"`
@@ -71,7 +72,9 @@ type Bridge struct {
  control Control
  controlAt time.Time
  worldParts []Part
- avatarParts []Part
+ avatarParts []Part // moving world objects (legacy Avatar field)
+ characterParts []Part
+ worldRevision,movingRevision,characterRevision uint64
  meshes map[uint32][]V
  meshVertices int
 }
@@ -85,9 +88,9 @@ func valid(u Update) bool {
 	if !vec(c.P) || !axis(c.R) || !axis(c.U) || !axis(c.F) || !finite(c.Fov) || c.Fov < 5 || c.Fov > 120 || !axis(u.Sun) {
 		return false
 	}
-	for _, group:=range []*[]Part{u.Parts,u.Avatar} {
+	for _, group:=range []*[]Part{u.Parts,u.Avatar,u.Character} {
  if group==nil {continue}
-		if len(*group) > 16384 || (group==u.Avatar && len(*group)>1024) {
+		if len(*group) > 16384 || (group==u.Avatar && len(*group)>1024) || (group==u.Character && len(*group)>64) {
 			return false
 		}
 		for _, p := range *group {
@@ -111,8 +114,10 @@ func (b *Bridge) applyMode(u Update,wantsControls,geometryOnly bool) Control {
 		b.mu.Lock()
  if !geometryOnly {b.state.Camera=u.Camera;b.state.Sun=u.Sun}
   changed:=false
-  if u.Parts!=nil && !slices.Equal(b.worldParts,*u.Parts) {b.worldParts=*u.Parts;changed=true}
-  if u.Avatar!=nil && !slices.Equal(b.avatarParts,*u.Avatar) {b.avatarParts=*u.Avatar;changed=true}
+  if u.Parts!=nil && !slices.Equal(b.worldParts,*u.Parts) {b.worldParts=*u.Parts;b.worldRevision++;changed=true}
+  if u.Avatar!=nil && !slices.Equal(b.avatarParts,*u.Avatar) {b.avatarParts=*u.Avatar;b.movingRevision++;changed=true}
+  // Only a camera packet may replace the character pose. No full-world copy.
+  if !geometryOnly && u.Character!=nil && !slices.Equal(b.characterParts,*u.Character) {b.characterParts=*u.Character;b.characterRevision++}
   if changed { // Allocate a new slice; concurrent readers retain an immutable snapshot.
    limit:=16384-len(b.avatarParts);if len(b.worldParts)<limit {limit=len(b.worldParts)}
    combined:=make([]Part,0,limit+len(b.avatarParts));combined=append(combined,b.worldParts[:limit]...);combined=append(combined,b.avatarParts...);b.state.Parts=combined;b.state.Scene++
@@ -129,6 +134,9 @@ func (b *Bridge) handler() http.Handler {
  mux.HandleFunc("/api/native-camera-ws",func(w http.ResponseWriter,r *http.Request){b.nativeStream(w,r,false)})
  mux.HandleFunc("/api/native-geometry-ws",func(w http.ResponseWriter,r *http.Request){b.nativeStream(w,r,true)})
  mux.HandleFunc("/api/native-input-ws",b.inputStream)
+ mux.HandleFunc("/api/native-pose-ws",func(w http.ResponseWriter,r *http.Request){b.nativeSplitStream(w,r,0)})
+ mux.HandleFunc("/api/native-world-ws",func(w http.ResponseWriter,r *http.Request){b.nativeSplitStream(w,r,1)})
+ mux.HandleFunc("/api/native-moving-ws",func(w http.ResponseWriter,r *http.Request){b.nativeSplitStream(w,r,2)})
  mux.HandleFunc("/api/mesh",b.meshHandler)
  mux.HandleFunc("/api/input", func(w http.ResponseWriter,r *http.Request){
   if r.Method!="POST" || r.Header.Get("Origin")!="" {http.Error(w,"native POST only",403);return}
@@ -199,7 +207,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("LUMEN GPU 0.6 | Native bridge at http://" + addr + " | Ctrl+C to stop")
+	fmt.Println("LUMEN GPU 0.7 | Native bridge at http://" + addr + " | Ctrl+C to stop")
 	s := http.Server{Handler: (&Bridge{}).handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
 	log.Fatal(s.Serve(l))
 }

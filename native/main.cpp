@@ -27,7 +27,7 @@ using Microsoft::WRL::ComPtr;
 using namespace std::chrono_literals;
 void check(HRESULT h,const char* msg){if(FAILED(h)){std::ostringstream o;o<<msg<<" (HRESULT 0x"<<std::hex<<uint32_t(h)<<")";throw std::runtime_error(o.str());}}
 struct Http { HINTERNET h=nullptr; ~Http(){if(h)WinHttpCloseHandle(h);} };
-std::mutex mtx; Scene incoming; bool connected=false; std::atomic<bool> stop=false;
+std::mutex mtx; Scene incoming; std::vector<Part> incomingMoving,incomingCharacter; bool connected=false; std::atomic<bool> stop=false;
 std::mutex meshMutex;std::unordered_map<uint32_t,std::shared_ptr<const std::vector<V>>> downloadedMeshes;std::atomic<uint64_t> meshEpoch{0};
 struct Input {bool active=false;int x=0,z=0,dx=0,dy=0;bool jump=false;};
 std::mutex inputMutex; Input input; bool captured=false; bool lastJump=false; std::atomic<DWORD> inputHttp{0}; int debugView=0; float exposure=0;
@@ -42,11 +42,11 @@ HINTERNET openSocket(HINTERNET conn,const wchar_t* path){
  if(!req.h||!WinHttpSetOption(req.h,WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET,nullptr,0)||!WinHttpSendRequest(req.h,WINHTTP_NO_ADDITIONAL_HEADERS,0,WINHTTP_NO_REQUEST_DATA,0,0,0)||!WinHttpReceiveResponse(req.h,nullptr))return nullptr;
  return WinHttpWebSocketCompleteUpgrade(req.h,0);
 }
-std::atomic<unsigned> receivedCamera{0},receivedGeometry{0};std::atomic<bool> nativeInputOnline{false};
+std::atomic<unsigned> receivedCamera{0},receivedGeometry{0},receivedPose{0},receivedMoving{0};std::atomic<bool> nativeInputOnline{false};
 std::atomic<uint64_t> cameraArrival{0};
 uint64_t nowMs(){return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
 void nativeInput(){
- Http session{WinHttpOpen(L"LumenGPU/0.6 input",WINHTTP_ACCESS_TYPE_NO_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0)};if(!session.h)return;
+ Http session{WinHttpOpen(L"LumenGPU/0.7 input",WINHTTP_ACCESS_TYPE_NO_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0)};if(!session.h)return;
  WinHttpSetTimeouts(session.h,500,500,500,500);Http conn{WinHttpConnect(session.h,L"127.0.0.1",8765,0)};if(!conn.h)return;
  while(!stop){
   Http ws{openSocket(conn.h,L"/api/native-input-ws")};if(!ws.h){nativeInputOnline=false;std::this_thread::sleep_for(200ms);continue;}
@@ -55,22 +55,25 @@ void nativeInput(){
   nativeInputOnline=false;inputHttp.store(0);
  }
 }
-void nativeReceive(bool geometry){
- Http session{WinHttpOpen(L"LumenGPU/0.6 view",WINHTTP_ACCESS_TYPE_NO_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0)};if(!session.h)return;
+void nativeReceive(int channel){
+ const bool geometry=channel!=0;
+ Http session{WinHttpOpen(L"LumenGPU/0.7 view",WINHTTP_ACCESS_TYPE_NO_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0)};if(!session.h)return;
  WinHttpSetTimeouts(session.h,500,500,500,1000);Http conn{WinHttpConnect(session.h,L"127.0.0.1",8765,0)};if(!conn.h)return;
  while(!stop){
-  Http ws{openSocket(conn.h,geometry?L"/api/native-geometry-ws":L"/api/native-camera-ws")};
+  Http ws{openSocket(conn.h,channel==0?L"/api/native-pose-ws":channel==1?L"/api/native-world-ws":L"/api/native-moving-ws")};
   if(!ws.h){if(!geometry){std::lock_guard<std::mutex> lk(mtx);connected=false;}std::this_thread::sleep_for(200ms);continue;}
   DWORD timeout=1000;WinHttpSetOption(ws.h,WINHTTP_OPTION_RECEIVE_TIMEOUT,&timeout,sizeof(timeout));
-  bool first=true;uint64_t prev=0;
+  bool first=true;uint64_t prev=0,prevPose=0;
   try{while(!stop){
    std::vector<unsigned char> data;WINHTTP_WEB_SOCKET_BUFFER_TYPE type;DWORD got=0;unsigned char tmp[16384];
    do{if(WinHttpWebSocketReceive(ws.h,tmp,sizeof(tmp),&got,&type)!=NO_ERROR||type==WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE)throw std::runtime_error("socket closed");if(type!=WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE&&type!=WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE)throw std::runtime_error("unexpected packet");data.insert(data.end(),tmp,tmp+got);if(data.size()>2000000)throw std::runtime_error("packet size");}while(type==WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE&&!stop);
    if(stop)break;Scene s=parse(data);uint64_t key=geometry?s.revision:s.seq;
    if(first||key!=prev){
     std::lock_guard<std::mutex> lk(mtx);
-    if(geometry){incoming.parts=std::move(s.parts);++incoming.revision;++receivedGeometry;}
-    else{incoming.p=s.p;incoming.r=s.r;incoming.u=s.u;incoming.f=s.f;incoming.fov=s.fov;incoming.sun=s.sun;incoming.seq=s.seq;connected=s.seq!=0;if(connected){++receivedCamera;cameraArrival.store(nowMs());}}
+    if(channel==1){incoming.parts=std::move(s.parts);++incoming.revision;++receivedGeometry;}
+    else if(channel==2){incomingMoving=std::move(s.parts);++incoming.revision;++receivedMoving;}
+    else{if(first||s.revision!=prevPose){incomingCharacter=std::move(s.parts);++incoming.revision;++incoming.poseRevision;++receivedPose;prevPose=s.revision;}
+     incoming.p=s.p;incoming.r=s.r;incoming.u=s.u;incoming.f=s.f;incoming.fov=s.fov;incoming.sun=s.sun;incoming.seq=s.seq;connected=s.seq!=0;if(connected){++receivedCamera;cameraArrival.store(nowMs());}}
     first=false;prev=key;
    }
   }}catch(...){}
@@ -85,7 +88,7 @@ void meshNetwork(){
  Http conn{WinHttpConnect(session.h,L"127.0.0.1",8765,0)};if(!conn.h)return;
  std::unordered_map<uint32_t,std::chrono::steady_clock::time_point> retry;
  while(!stop){
-  std::unordered_set<uint32_t> ids;{std::lock_guard<std::mutex> lk(mtx);if(connected)for(auto& p:incoming.parts)if(p.shape>=3&&p.shape<=16777215)ids.insert(uint32_t(p.shape));}
+  std::unordered_set<uint32_t> ids;{std::lock_guard<std::mutex> lk(mtx);if(connected)for(auto list:{&incoming.parts,&incomingMoving,&incomingCharacter})for(auto& p:*list)if(p.shape>=3&&p.shape<=16777215)ids.insert(uint32_t(p.shape));}
   for(uint32_t id:ids){if(stop)break;
    {std::lock_guard<std::mutex> lk(meshMutex);if(downloadedMeshes.count(id)||downloadedMeshes.size()>=256)continue;}
    auto now=std::chrono::steady_clock::now();if(retry.count(id)&&now<retry[id])continue;retry[id]=now+2s;
@@ -191,11 +194,11 @@ void settingsUI(HWND hwnd,UINT w,UINT h,size_t parts,bool live,float fps,float s
  if(!uiVisible||captured||!uiReady)return;
  ImGui_ImplDX12_NewFrame();ImGui_ImplWin32_NewFrame();auto& io=ImGui::GetIO();RECT r{};GetClientRect(hwnd,&r);POINT mouse{};if(GetCursorPos(&mouse)&&ScreenToClient(hwnd,&mouse)&&r.right>0&&r.bottom>0&&GetForegroundWindow()==hwnd)io.AddMousePosEvent(float(mouse.x)*w/r.right,float(mouse.y)*h/r.bottom);io.DisplaySize=ImVec2(float(w),float(h));io.DisplayFramebufferScale=ImVec2(1,1);ImGui::NewFrame();
  ImGui::SetNextWindowPos(ImVec2(8,8),ImGuiCond_FirstUseEver);ImGui::SetNextWindowSize(ImVec2(std::min(360.f,float(w)-16),std::min(330.f,float(h)-16)),ImGuiCond_FirstUseEver);bool changed=false;
- if(ImGui::Begin("LUMEN GPU / 0.6",&uiVisible)){ImGui::Text("%.0f FPS | %.0f sync Hz | %zu parts",fps,sync,parts);ImGui::TextUnformatted(live?"Studio connected":"Demo scene");
+ if(ImGui::Begin("LUMEN GPU / 0.7",&uiVisible)){ImGui::Text("%.0f FPS | %.0f sync Hz | %zu parts",fps,sync,parts);ImGui::TextUnformatted(live?"Studio connected":"Demo scene");
  if(ImGui::BeginTabBar("tabs")){
  if(ImGui::BeginTabItem("Path tracing")){changed|=ImGui::SliderFloat("Render scale",&renderScale,.25f,1.f,"%.2f");ImGui::Text("Internal: %u x %u",unsigned(w*renderScale),unsigned(h*renderScale));changed|=ImGui::Checkbox("GPU denoiser",&denoise);changed|=ImGui::SliderFloat("Denoise strength",&denoiseStrength,.1f,2.f);changed|=ImGui::SliderInt("Filter radius",&filterRadius,1,3);changed|=ImGui::SliderInt("SPP",&spp,1,8);changed|=ImGui::SliderInt("Bounces",&bounces,0,12);changed|=ImGui::Checkbox("Global illumination",&gi);changed|=ImGui::Checkbox("Reflections",&reflections);changed|=ImGui::Checkbox("Glass / refraction",&glass);changed|=ImGui::Checkbox("Accumulation",&accum);changed|=ImGui::SliderFloat("Ray distance",&rayDistance,100,50000,"%.0f studs",ImGuiSliderFlags_Logarithmic);if(ImGui::Button("Reset samples"))changed=true;ImGui::EndTabItem();}
  if(ImGui::BeginTabItem("Lighting")){changed|=ImGui::SliderFloat("Exposure",&exposure,-4,4);changed|=ImGui::SliderFloat("Sky",&skyStrength,0,4);changed|=ImGui::SliderFloat("Sun",&sunStrength,0,4);changed|=ImGui::SliderFloat("Sun angular radius",&sunRadius,0,.08f,"%.3f");changed|=ImGui::SliderFloat("Ambient",&ambientStrength,0,.5f);const char* tones[]={"ACES","Reinhard","Linear"};changed|=ImGui::Combo("Tonemapper",&tonemap,tones,3);const char* views[]={"Path traced","Albedo","Normals","Sky only","Direct sun visibility","Sky visibility (up)"};changed|=ImGui::Combo("Debug",&debugView,views,6);ImGui::EndTabItem();}
- if(ImGui::BeginTabItem("Game")){float d=orbitSetting.load(),s=sensitivitySetting.load(),f=fovSetting.load();if(ImGui::SliderFloat("Camera distance",&d,2,40))orbitSetting.store(d);if(ImGui::SliderFloat("Mouse sensitivity",&s,.1f,5))sensitivitySetting.store(s);if(ImGui::SliderFloat("FOV",&f,35,110))fovSetting.store(f);ImGui::Checkbox("Camera smoothing",&smoothCamera);if(ImGui::Checkbox("Demo scene",&forceDemo))changed=true;ImGui::TextUnformatted("F2 = capture controls; Esc = release");ImGui::TextUnformatted("F1 = settings; F11 = fullscreen");ImGui::Text("Native input WS: %s",nativeInputOnline.load()?"online":"offline");auto arrival=cameraArrival.load();auto current=nowMs();ImGui::Text("Last camera arrival: %llu ms ago",(unsigned long long)(arrival&&current>=arrival?current-arrival:0));ImGui::EndTabItem();}ImGui::EndTabBar();}}
+ if(ImGui::BeginTabItem("Game")){float d=orbitSetting.load(),s=sensitivitySetting.load(),f=fovSetting.load();if(ImGui::SliderFloat("Camera distance",&d,2,40))orbitSetting.store(d);if(ImGui::SliderFloat("Mouse sensitivity",&s,.1f,5))sensitivitySetting.store(s);if(ImGui::SliderFloat("FOV",&f,35,110))fovSetting.store(f);ImGui::Checkbox("Camera + avatar smoothing",&smoothCamera);if(ImGui::Checkbox("Demo scene",&forceDemo))changed=true;ImGui::TextUnformatted("F2 = capture controls; Esc = release");ImGui::TextUnformatted("F1 = settings; F11 = fullscreen");ImGui::Text("Native input WS: %s",nativeInputOnline.load()?"online":"offline");auto arrival=cameraArrival.load();auto current=nowMs();ImGui::Text("Last camera arrival: %llu ms ago",(unsigned long long)(arrival&&current>=arrival?current-arrival:0));ImGui::EndTabItem();}ImGui::EndTabBar();}}
  ImGui::End();ImGui::Render();if(changed)resetHistory=true;
 }
 // Smooth between authoritative camera packets without changing game physics.
@@ -204,13 +207,30 @@ V crossV(V a,V b){return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};}
 float dist2(V a,V b){float x=a.x-b.x,y=a.y-b.y,z=a.z-b.z;return x*x+y*y+z*z;}
 V unitV(V v,V fallback){float n=std::sqrt(v.x*v.x+v.y*v.y+v.z*v.z);if(n<.0001f)return fallback;return {v.x/n,v.y/n,v.z/n};}
 void smoothView(Scene& target,const Scene& previous,float dt){if(dist2(target.p,previous.p)>100.f||dist2(target.f,previous.f)>1.5f)return;float k=1.f-std::exp(-std::clamp(dt,0.f,.1f)*38.f);if(dist2(previous.p,target.p)>1e-5f)target.p=blendV(previous.p,target.p,k);if(dist2(previous.f,target.f)>1e-7f||dist2(previous.u,target.u)>1e-7f){target.f=unitV(blendV(previous.f,target.f,k),target.f);target.r=unitV(crossV(target.f,blendV(previous.u,target.u,k)),target.r);target.u=unitV(crossV(target.r,target.f),target.u);}}
-int main(int argc,char** argv){std::thread net,geometryNet,inputNet,meshNet;try{UINT w=1280,h=720;if(argc==3){int a=std::stoi(argv[1]),b=std::stoi(argv[2]);if(a<160||a>1920||b<90||b>1080)throw std::runtime_error("Resolution must be 160x90 to 1920x1080");w=a;h=b;}wchar_t exe[32768];GetModuleFileNameW(nullptr,exe,32768);auto path=std::filesystem::path(exe).parent_path()/L"trace.cso";
- WNDCLASSW wc{};wc.lpfnWndProc=wnd;wc.hInstance=GetModuleHandle(nullptr);wc.lpszClassName=L"LumenNativeDXR";wc.hCursor=LoadCursor(nullptr,IDC_ARROW);RegisterClassW(&wc);HWND hwnd=CreateWindowW(wc.lpszClassName,L"LUMEN GPU 0.6 - initializing",WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,1000,650,nullptr,nullptr,wc.hInstance,nullptr);if(!hwnd)throw std::runtime_error("Window creation failed");ShowWindow(hwnd,SW_SHOW);Renderer r(hwnd,w,h);r.init(path);net=std::thread(nativeReceive,false);geometryNet=std::thread(nativeReceive,true);inputNet=std::thread(nativeInput);meshNet=std::thread(meshNetwork);Scene s=demo(),d=s;bool oldLive=false,first=true;uint64_t rev=0,guardSignature=0,lastMeshEpoch=0;unsigned frame=0,count=0,frames=0;auto stamp=std::chrono::steady_clock::now();auto lastFrame=stamp;uint64_t lastSeq=0;unsigned packets=0;float displayedFPS=0,displayedSync=0;bool quit=false;while(!quit){MSG msg;while(PeekMessage(&msg,nullptr,0,0,PM_REMOVE)){if(msg.message==WM_QUIT){quit=true;break;}TranslateMessage(&msg);DispatchMessage(&msg);}if(quit)break;sampleInput(hwnd);if(IsIconic(hwnd)){std::this_thread::sleep_for(50ms);continue;}Scene next;bool live=false;{std::lock_guard<std::mutex> lk(mtx);live=connected&&!forceDemo;if(live)next=incoming;}if(!live)next=d;
+// Optional paired smoothing: the camera and avatar use the same factor.
+// Snap rather than interpolate on layout changes or teleports.
+bool smoothPair(Scene& target,const Scene& previous,float dt){
+ if(target.characterCount!=previous.characterCount||dist2(target.p,previous.p)>100.f||dist2(target.f,previous.f)>1.5f)return false;
+ size_t n=target.characterCount,a=target.parts.size()-n,b=previous.parts.size()-n;
+ for(size_t i=0;i<n;++i){auto& x=target.parts[a+i];auto& y=previous.parts[b+i];if(x.shape!=y.shape||dist2(x.s,y.s)>1e-6f||dist2(x.p,y.p)>100.f)return false;}
+ smoothView(target,previous,dt);float k=1.f-std::exp(-std::clamp(dt,0.f,.1f)*38.f);
+ bool changed=false;
+ for(size_t i=0;i<n;++i){auto& x=target.parts[a+i];auto& y=previous.parts[b+i];
+  if(dist2(x.p,y.p)>1e-6f||dist2(x.r,y.r)>1e-7f||dist2(x.u,y.u)>1e-7f){
+   x.p=blendV(y.p,x.p,k);x.r=unitV(blendV(y.r,x.r,k),x.r);x.b=unitV(crossV(x.r,blendV(y.u,x.u,k)),x.b);x.u=unitV(crossV(x.b,x.r),x.u);changed=true;
+  }
+ }
+ return changed;
+}
+int main(int argc,char** argv){std::thread net,geometryNet,movingNet,inputNet,meshNet;try{UINT w=1280,h=720;if(argc==3){int a=std::stoi(argv[1]),b=std::stoi(argv[2]);if(a<160||a>1920||b<90||b>1080)throw std::runtime_error("Resolution must be 160x90 to 1920x1080");w=a;h=b;}wchar_t exe[32768];GetModuleFileNameW(nullptr,exe,32768);auto path=std::filesystem::path(exe).parent_path()/L"trace.cso";
+ WNDCLASSW wc{};wc.lpfnWndProc=wnd;wc.hInstance=GetModuleHandle(nullptr);wc.lpszClassName=L"LumenNativeDXR";wc.hCursor=LoadCursor(nullptr,IDC_ARROW);RegisterClassW(&wc);HWND hwnd=CreateWindowW(wc.lpszClassName,L"LUMEN GPU 0.7 - initializing",WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,1000,650,nullptr,nullptr,wc.hInstance,nullptr);if(!hwnd)throw std::runtime_error("Window creation failed");ShowWindow(hwnd,SW_SHOW);Renderer r(hwnd,w,h);r.init(path);net=std::thread(nativeReceive,0);geometryNet=std::thread(nativeReceive,1);movingNet=std::thread(nativeReceive,2);inputNet=std::thread(nativeInput);meshNet=std::thread(meshNetwork);Scene s=demo(),d=s;bool oldLive=false,first=true;uint64_t rev=0,guardSignature=0,lastMeshEpoch=0;unsigned frame=0,count=0,frames=0;auto stamp=std::chrono::steady_clock::now();auto lastFrame=stamp;uint64_t lastSeq=0;unsigned packets=0;float displayedFPS=0,displayedSync=0;bool quit=false;while(!quit){MSG msg;while(PeekMessage(&msg,nullptr,0,0,PM_REMOVE)){if(msg.message==WM_QUIT){quit=true;break;}TranslateMessage(&msg);DispatchMessage(&msg);}if(quit)break;sampleInput(hwnd);if(IsIconic(hwnd)){std::this_thread::sleep_for(50ms);continue;}Scene next;bool live=false;{std::lock_guard<std::mutex> lk(mtx);live=connected&&!forceDemo;if(live){next=incoming;size_t character=std::min<size_t>(64,incomingCharacter.size());size_t moving=std::min<size_t>(1024,incomingMoving.size());if(next.parts.size()>16384-character-moving)next.parts.resize(16384-character-moving);next.parts.insert(next.parts.end(),incomingMoving.begin(),incomingMoving.begin()+moving);next.parts.insert(next.parts.end(),incomingCharacter.begin(),incomingCharacter.begin()+character);next.characterCount=character;}}if(!live)next=d;
  auto tick=std::chrono::steady_clock::now();float dt=std::chrono::duration<float>(tick-lastFrame).count();lastFrame=tick;
  if(live && next.seq!=lastSeq){lastSeq=next.seq;++packets;}
- if(live&&oldLive&&!first&&smoothCamera)smoothView(next,s,dt);
+ bool interpolated=false;if(live&&oldLive&&!first&&smoothCamera)interpolated=smoothPair(next,s,dt);
+ // Restore raw pose on the first frame after smoothing is disabled.
+ static bool previousSmoothing=false;bool smoothingChanged=previousSmoothing!=smoothCamera;previousSmoothing=smoothCamera;
  settingsUI(hwnd,w,h,next.parts.size(),live,displayedFPS,displayedSync);
  uint64_t signature=enclosingSignature(next,glass);
- uint64_t newMeshEpoch=meshEpoch.load();if(first||live!=oldLive||next.revision!=rev||signature!=guardSignature||newMeshEpoch!=lastMeshEpoch){lastMeshEpoch=newMeshEpoch;r.scene(next);count=0;first=false;rev=next.revision;guardSignature=signature;oldLive=live;}
- if(memcmp(&s.p,&next.p,12)||memcmp(&s.r,&next.r,12)||memcmp(&s.u,&next.u,12)||memcmp(&s.f,&next.f,12)||s.fov!=next.fov||memcmp(&s.sun,&next.sun,12)||resetHistory||!accum){count=0;resetHistory=false;}s=std::move(next);r.render(s,frame++,count);count=std::min(count+1,1024u);++frames;auto now=std::chrono::steady_clock::now();float sec=std::chrono::duration<float>(now-stamp).count();if(sec>=.5f){displayedFPS=frames/sec;displayedSync=receivedCamera.exchange(0)/sec;Input keyState;{std::lock_guard<std::mutex> lk(inputMutex);keyState=input;}std::wostringstream title;title<<L"LUMEN GPU 0.6 | DXR 1.1 | "<<r.gpu<<L" | "<<UINT(w*renderScale)<<L"x"<<UINT(h*renderScale)<<L" -> "<<w<<L"x"<<h<<L" | "<<int(frames/sec+.5f)<<L" FPS | "<<int(displayedSync+.5f)<<L" recv Hz / "<<int(packets/sec+.5f)<<L" shown Hz | "<<(live?L"Studio":L"Demo")<<L" | F2 "<<(captured?L"ON":L"OFF")<<L" WS "<<(nativeInputOnline.load()?L"ON":L"OFF")<<L" ["<<keyState.x<<L","<<keyState.z<<L"] | "<<s.parts.size()<<L" boxes | skip "<<r.skippedEnclosing<<L" | mesh "<<r.meshInstances<<L" / pending "<<r.meshFallback<<L" | TLAS "<<r.tlasMs<<L"ms R"<<r.refitTotal<<L"/B"<<r.rebuildTotal<<L" | "<<spp<<L" SPP / "<<bounces<<L" bounces | F3 "<<debugView<<L" EV "<<exposure<<L" | F6 smoothing "<<(smoothCamera?L"ON":L"OFF");SetWindowTextW(hwnd,title.str().c_str());stamp=now;frames=0;packets=0;}}
- stop=true;if(net.joinable())net.join();if(geometryNet.joinable())geometryNet.join();if(inputNet.joinable())inputNet.join();if(meshNet.joinable())meshNet.join();return 0;}catch(const std::exception& e){stop=true;if(net.joinable())net.join();if(geometryNet.joinable())geometryNet.join();if(inputNet.joinable())inputNet.join();if(meshNet.joinable())meshNet.join();MessageBoxA(nullptr,e.what(),"LUMEN GPU DXR error",MB_OK|MB_ICONERROR);return 1;}}
+ uint64_t newMeshEpoch=meshEpoch.load();if(first||live!=oldLive||next.revision!=rev||signature!=guardSignature||newMeshEpoch!=lastMeshEpoch||interpolated||smoothingChanged){lastMeshEpoch=newMeshEpoch;r.scene(next);count=0;first=false;rev=next.revision;guardSignature=signature;oldLive=live;}
+ if(memcmp(&s.p,&next.p,12)||memcmp(&s.r,&next.r,12)||memcmp(&s.u,&next.u,12)||memcmp(&s.f,&next.f,12)||s.fov!=next.fov||memcmp(&s.sun,&next.sun,12)||resetHistory||!accum){count=0;resetHistory=false;}s=std::move(next);r.render(s,frame++,count);count=std::min(count+1,1024u);++frames;auto now=std::chrono::steady_clock::now();float sec=std::chrono::duration<float>(now-stamp).count();if(sec>=.5f){displayedFPS=frames/sec;displayedSync=receivedCamera.exchange(0)/sec;float poseHz=receivedPose.exchange(0)/sec;float movingHz=receivedMoving.exchange(0)/sec;float worldHz=receivedGeometry.exchange(0)/sec;Input keyState;{std::lock_guard<std::mutex> lk(inputMutex);keyState=input;}std::wostringstream title;title<<L"LUMEN GPU 0.7 | DXR 1.1 | "<<r.gpu<<L" | "<<UINT(w*renderScale)<<L"x"<<UINT(h*renderScale)<<L" -> "<<w<<L"x"<<h<<L" | "<<int(frames/sec+.5f)<<L" FPS | "<<int(displayedSync+.5f)<<L" recv Hz / "<<int(packets/sec+.5f)<<L" shown Hz | pose "<<int(poseHz+.5f)<<L" Hz | move "<<int(movingHz+.5f)<<L" / world "<<int(worldHz+.5f)<<L" Hz | "<<(live?L"Studio":L"Demo")<<L" | F2 "<<(captured?L"ON":L"OFF")<<L" WS "<<(nativeInputOnline.load()?L"ON":L"OFF")<<L" ["<<keyState.x<<L","<<keyState.z<<L"] | "<<s.parts.size()<<L" boxes | skip "<<r.skippedEnclosing<<L" | mesh "<<r.meshInstances<<L" / pending "<<r.meshFallback<<L" | TLAS "<<r.tlasMs<<L"ms R"<<r.refitTotal<<L"/B"<<r.rebuildTotal<<L" | "<<spp<<L" SPP / "<<bounces<<L" bounces | F3 "<<debugView<<L" EV "<<exposure<<L" | F6 smoothing "<<(smoothCamera?L"ON":L"OFF");SetWindowTextW(hwnd,title.str().c_str());stamp=now;frames=0;packets=0;}}
+ stop=true;if(net.joinable())net.join();if(geometryNet.joinable())geometryNet.join();if(movingNet.joinable())movingNet.join();if(inputNet.joinable())inputNet.join();if(meshNet.joinable())meshNet.join();return 0;}catch(const std::exception& e){stop=true;if(net.joinable())net.join();if(geometryNet.joinable())geometryNet.join();if(movingNet.joinable())movingNet.join();if(inputNet.joinable())inputNet.join();if(meshNet.joinable())meshNet.join();MessageBoxA(nullptr,e.what(),"LUMEN GPU DXR error",MB_OK|MB_ICONERROR);return 1;}}
