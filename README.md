@@ -9,3 +9,5 @@ V0.8.1: colored direct sun and sky transmission through glass, including tinted 
 V0.8.2: scroll zoom with F2 capture, first-person at minimum zoom, Roblox camera lock respected. Local avatar stays in the TLAS but is masked from primary camera rays; shadows/reflections/GI still include it. Replace native files and reinstall Lua.
 
 V0.8.3 preview: third-person free cursor, first-person lock, RMB orbit, simple ScreenGui HUD and Studio VirtualInput mouse clicks. See README.txt for unsupported UI features and runtime caveats.
+
+V0.8.4: anchored RMB orbit and right/middle-click plus keyboard edge forwarding to Studio. Native F1/F2/F11/Esc reserved. See README.txt for limitations.

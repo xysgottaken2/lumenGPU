@@ -67,6 +67,7 @@ type State struct {
 }
 type Control struct {
  Pointer []PointerEvent `json:"pointer,omitempty"`
+ Keys []KeyEvent `json:"keys,omitempty"`
  Active bool `json:"active"`
  X float64 `json:"x"`
  Z float64 `json:"z"`
@@ -140,7 +141,7 @@ func (b *Bridge) applyMode(u Update,wantsControls,geometryOnly bool) Control {
   }
 if !geometryOnly {b.state.Seq++;b.state.Received=time.Now().UnixMilli()}
   c:=Control{}
-  if wantsControls && time.Since(b.controlAt)<500*time.Millisecond {c=b.control;b.control.DX=0;b.control.DY=0;b.control.Jump=false;b.control.Pointer=nil}
+  if wantsControls && time.Since(b.controlAt)<500*time.Millisecond {c=b.control;b.control.DX=0;b.control.DY=0;b.control.Jump=false;b.control.Pointer=nil;b.control.Keys=nil}
  b.mu.Unlock();return c
 }
 func (b *Bridge) handler() http.Handler {
@@ -224,7 +225,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("LUMEN GPU 0.8.3 | Native bridge at http://" + addr + " | Ctrl+C to stop")
+	fmt.Println("LUMEN GPU 0.8.4 | Native bridge at http://" + addr + " | Ctrl+C to stop")
 	s := http.Server{Handler: (&Bridge{}).handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
 	log.Fatal(s.Serve(l))
 }

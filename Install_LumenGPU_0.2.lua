@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.8.3)')
+print('[LumenGPU] Client starting (0.8.4)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -39,19 +39,41 @@ local controls=nil
 local oldCameraType=nil
 local virtualInput=nil
 local pointerHeld={}
+local keyHeld={}
+local keyNames={ [8]='Backspace',[9]='Tab',[13]='Return',[19]='Pause',[20]='CapsLock',[32]='Space',[33]='PageUp',[34]='PageDown',[35]='End',[36]='Home',[37]='Left',[38]='Up',[39]='Right',[40]='Down',[45]='Insert',[46]='Delete',[91]='LeftSuper',[92]='RightSuper',[96]='KeypadZero',[97]='KeypadOne',[98]='KeypadTwo',[99]='KeypadThree',[100]='KeypadFour',[101]='KeypadFive',[102]='KeypadSix',[103]='KeypadSeven',[104]='KeypadEight',[105]='KeypadNine',[106]='KeypadMultiply',[107]='KeypadPlus',[109]='KeypadMinus',[110]='KeypadPeriod',[111]='KeypadDivide',[144]='NumLock',[145]='ScrollLock',[160]='LeftShift',[161]='RightShift',[162]='LeftControl',[163]='RightControl',[164]='LeftAlt',[165]='RightAlt',[186]='Semicolon',[187]='Equals',[188]='Comma',[189]='Minus',[190]='Period',[191]='Slash',[192]='Backquote',[219]='LeftBracket',[220]='BackSlash',[221]='RightBracket',[222]='Quote',[226]='BackSlash' }
+for i,name in {'Zero','One','Two','Three','Four','Five','Six','Seven','Eight','Nine'} do keyNames[47+i]=name end
+for i=65,90 do keyNames[i]=string.char(i) end
+for i=112,126 do keyNames[i]='F'..tostring(i-111) end
+local keyCodes={};for _,item in Enum.KeyCode:GetEnumItems() do keyCodes[item.Name]=item end
 local pointerPositions={}
 local lastVirtualWarning=0
-local function forwardPointer(events)
-    if type(events)~='table' then return end
+local function ensureVirtualInput()
     if not virtualInput then local ok,v=pcall(function() return UIS:CreateVirtualInput() end);if ok then virtualInput=v end end
-    if not virtualInput then if os.clock()-lastVirtualWarning>5 then lastVirtualWarning=os.clock();warn('[LumenGPU] VirtualInput unavailable in this Studio session') end;return end
+    if not virtualInput and os.clock()-lastVirtualWarning>5 then lastVirtualWarning=os.clock();warn('[LumenGPU] VirtualInput unavailable in this Studio session') end
+    return virtualInput~=nil
+end
+local function forwardKeys(events)
+    if type(events)~='table' or #events==0 or not ensureVirtualInput() then return end
+    for _,e in events do
+        local key=keyCodes[keyNames[e.vk]]
+        if key then
+            local down=e.down==true;local repeated=e['repeat']==true
+            if repeated or (keyHeld[key]==true)~=down then
+                local ok,err=pcall(function() virtualInput:SendKey(down,key,repeated) end)
+                if ok then keyHeld[key]=down elseif os.clock()-lastVirtualWarning>5 then lastVirtualWarning=os.clock();warn('[LumenGPU] SendKey: '..tostring(err)) end
+            end
+        end
+    end
+end
+local function forwardPointer(events)
+    if type(events)~='table' or #events==0 or not ensureVirtualInput() then return end
     local cam=workspace.CurrentCamera;if not cam then return end
     for _,e in events do
         if type(e)=='table' and type(e.x)=='number' and type(e.y)=='number' then
             local pos=Vector2.new(math.clamp(e.x,0,1)*cam.ViewportSize.X,math.clamp(e.y,0,1)*cam.ViewportSize.Y)
-            local key=e.button==1 and Enum.UserInputType.MouseButton1 or e.button==2 and Enum.UserInputType.MouseButton2 or nil
+            local key=e.button==1 and Enum.UserInputType.MouseButton1 or e.button==2 and Enum.UserInputType.MouseButton2 or e.button==3 and Enum.UserInputType.MouseButton3 or nil
             local ok,err=pcall(function()
-                if key then virtualInput:SendMouseButton(pos,key,e.down==true,0);pointerHeld[key]=e.down==true;pointerPositions[key]=pos else virtualInput:SendMousePosition(pos) end
+                if key then if (pointerHeld[key]==true)~=(e.down==true) then virtualInput:SendMouseButton(pos,key,e.down==true,0);pointerHeld[key]=e.down==true;pointerPositions[key]=pos end else virtualInput:SendMousePosition(pos) end
             end)
             if not ok and os.clock()-lastVirtualWarning>5 then lastVirtualWarning=os.clock();warn('[LumenGPU] VirtualInput: '..tostring(err)) end
         end
@@ -59,7 +81,8 @@ local function forwardPointer(events)
 end
 local function releasePointer()
     if virtualInput then for key,held in pointerHeld do if held then pcall(function() virtualInput:SendMouseButton(pointerPositions[key] or Vector2.zero,key,false,0) end) end end end
-    table.clear(pointerHeld);table.clear(pointerPositions)
+    if virtualInput then for key,held in keyHeld do if held then pcall(function() virtualInput:SendKey(false,key,false) end) end end end
+    table.clear(keyHeld);table.clear(pointerHeld);table.clear(pointerPositions)
 end
 local gui=Instance.new('ScreenGui'); gui.Name='LumenGPUConnection';gui.ResetOnSpawn=false;gui.DisplayOrder=100;gui.Parent=player:WaitForChild('PlayerGui')
 local button=Instance.new('TextButton');button.Name='Toggle';button.Size=UDim2.fromOffset(240,34);button.Position=UDim2.new(1,-252,0,12);button.BackgroundColor3=Color3.fromRGB(35,45,57);button.TextColor3=Color3.new(1,1,1);button.TextSize=14;button.Font=Enum.Font.GothamMedium;button.Text='LUMEN GPU: Start (P)';button.Parent=gui
@@ -116,7 +139,7 @@ remote.OnClientEvent:Connect(function(kind,c)
     if (c.distance or 0)>0 then orbitDistance=math.clamp(c.distance,.5,40) end
     if (c.fov or 0)>0 then cam.FieldOfView=math.clamp(c.fov,35,110) end
     yaw-=math.clamp(c.dx or 0,-2000,2000)*sensitivity; pitch=math.clamp(pitch-math.clamp(c.dy or 0,-2000,2000)*sensitivity,-1.553,1.553)
-    input=c;lastInput=os.clock();forwardPointer(c.pointer)
+    input=c;lastInput=os.clock();forwardPointer(c.pointer);forwardKeys(c.keys)
     local hum=player.Character and player.Character:FindFirstChildOfClass('Humanoid'); if hum and c.jump then hum.Jump=true end
 end)
 local function vec(v) return {v.X,v.Y,v.Z} end
@@ -374,7 +397,7 @@ local function toggle()
 end
 button.Activated:Connect(toggle)
 UIS.InputBegan:Connect(function(i,processed)
-    if i.KeyCode==Enum.KeyCode.P and not UIS:GetFocusedTextBox() then toggle() end
+    if i.KeyCode==Enum.KeyCode.P and not external and not UIS:GetFocusedTextBox() then toggle() end
 end)
 -- Input is held state, not an individual key press per network packet.
 -- Override default PlayerModule movement after its Input-priority update.
@@ -675,4 +698,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.8.3 context-aware cursor and ScreenGui HUD installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.8.4 anchored orbit and keyboard forwarding installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
