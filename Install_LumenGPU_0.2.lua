@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.9.1)')
+print('[LumenGPU] Client starting (0.9.2)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -152,6 +152,8 @@ local meshCount=0
 local externalImages={}
 local imageCount=0
 local imageQueue={}
+local resolvedImages={}
+local imageScanned=setmetatable({},{__mode='k'})
 local function numericAsset(uri)
     if type(uri)~='string' then return nil end
     local id=uri:match('^rbxassetid://(%d+)$')
@@ -164,7 +166,7 @@ local function discoverImage(uri)
     if id and not externalImages[id] and imageCount<128 then
         imageCount+=1;externalImages[id]=imageCount;imageQueue[#imageQueue+1]={asset=id,slot=imageCount}
     end
-    return id and externalImages[id] or 0
+    return id and resolvedImages[id] or 0
 end
 local faceCode={[Enum.NormalId.Right]=1,[Enum.NormalId.Left]=2,[Enum.NormalId.Top]=3,[Enum.NormalId.Bottom]=4,[Enum.NormalId.Back]=5,[Enum.NormalId.Front]=6}
 local function discoverImages(obj)
@@ -198,7 +200,9 @@ local function discoverImages(obj)
     end
     return nil
 end
-local imageScanned=setmetatable({},{__mode='k'})
+remote.OnClientEvent:Connect(function(kind,id,slot)
+    if kind=='lumenusImageAck' and type(slot)=='number' and slot>0 then resolvedImages[id]=slot;imageScanned=setmetatable({},{__mode='k'});meshReadyVersion+=1 end
+end)
 task.spawn(function()
     while task.wait(.5) do
         if active and #imageQueue>0 then local q=table.remove(imageQueue,1);remote:FireServer('lumenusImage',q.asset,q.slot) end
@@ -236,7 +240,8 @@ local function extractMesh(entry)
         for i,face in faces do
             local ids=editable:GetFaceVertices(face)
             if #ids==3 then
-                local faceUVs=editable:GetFaceUVs(face)
+                local uvOK,faceUVs=pcall(function() return editable:GetFaceUVs(face) end)
+                if not uvOK then faceUVs={} end
                 for j,id in ids do
                     local v=editable:GetPosition(id)/scale
                     local uv=faceUVs[j] and editable:GetUV(faceUVs[j]) or Vector2.zero
@@ -279,7 +284,8 @@ task.spawn(function()
     while true do
         if active and #meshQueue>0 then
             local e=table.remove(meshQueue,1)
-            local ok,err=pcall(extractMesh,e)
+            local ok,err=true,nil
+            if not e.terrain then ok,err=pcall(extractMesh,e) end
             if ok then
                 -- Small paced chunks; server uploads via a separate request.
                 while not active do task.wait(.25) end
@@ -363,8 +369,19 @@ local function materialPart(obj)
     end
     return {p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(size),c={color.R,color.G,color.B},metal=num('PathMetallic',metal,0,1),rough=num('PathRoughness',rough,.025,1),emit=num('PathEmission',(obj:GetAttribute('PathEmissive')==true or mat==Enum.Material.Neon) and 4 or 0,0,50),transmission=num('PathTransmission',mat==Enum.Material.Glass and 1 or obj.Transparency,0,1),ior=num('PathIOR',1.5,1.001,3),shape=shape,specular=num('PathSpecular',1,0,1),emissionColor={ec.R,ec.G,ec.B},tex=tex or nil}
 end
+local lastClothingScan=-100
 local function avatarSnapshot()
     local list={};local char=player.Character;if not char then return list end
+    if os.clock()-lastClothingScan>3 then
+        lastClothingScan=os.clock()
+        for _,item in char:GetChildren() do
+            if item:IsA('Shirt') then discoverImage(item.ShirtTemplate)
+            elseif item:IsA('Pants') then discoverImage(item.PantsTemplate)
+            elseif item:IsA('ShirtGraphic') then discoverImage(item.Graphic)
+            elseif item:IsA('CharacterMesh') then discoverImage('rbxassetid://'..tostring(item.BaseTextureId));discoverImage('rbxassetid://'..tostring(item.OverlayTextureId)) end
+        end
+        for _,item in char:GetDescendants() do if item:IsA('BasePart') then imageScanned[item]=nil end end
+    end
     for _,obj in char:GetDescendants() do
         if obj:IsA('BasePart') and obj.Name~='HumanoidRootPart' and obj.Transparency<.95 and obj:GetAttribute('PathIgnore')~=true and #list<64 then
             list[#list+1]=materialPart(obj)
@@ -419,6 +436,104 @@ workspace.DescendantRemoving:Connect(function(obj)
 end)
 player.CharacterAdded:Connect(function() dirty=true end)
 player.CharacterRemoving:Connect(function() dirty=true end)
+
+-- Terrain preview: mesh occupancy at Roblox's 4-stud voxel resolution.
+-- One bounded region, captured once per Play session; no scene-instance changes.
+local terrainRows={}
+local terrainStarted=false
+local terrainMeshBudget=64
+local terrainCorners={Vector3.new(0,0,0),Vector3.new(1,0,0),Vector3.new(1,1,0),Vector3.new(0,1,0),Vector3.new(0,0,1),Vector3.new(1,0,1),Vector3.new(1,1,1),Vector3.new(0,1,1)}
+local terrainTets={{1,2,3,7},{1,3,4,7},{1,4,8,7},{1,8,5,7},{1,5,6,7},{1,6,2,7}}
+local function terrainChunk(origin)
+    local terrain=workspace.Terrain
+    local side=64
+    local region=Region3.new(origin,origin+Vector3.new(side+4,side+4,side+4))
+    local materials,occupancy=terrain:ReadVoxels(region,4)
+    local groups={}
+    local function emit(mat,a,b,c,inside)
+        local g=groups[mat];if not g then g={};groups[mat]=g end
+        if #g>=60000 then return end
+        local cross=(b-a):Cross(c-a)
+        if cross.Magnitude<.00001 then return end
+        if cross:Dot(inside-a)>0 then b,c=c,b end
+        for _,v in {a,b,c} do g[#g+1]={v.X/side,v.Y/side,v.Z/side,0,0} end
+    end
+    for x=1,16 do
+        for y=1,16 do for z=1,16 do
+            local p,d,m={},{},{}
+            local allIn,allOut=true,true
+            for i,off in terrainCorners do
+                local ix,iy,iz=x+off.X,y+off.Y,z+off.Z
+                local mat=materials[ix][iy][iz]
+                local val=(mat==Enum.Material.Air or mat==Enum.Material.Water) and 0 or occupancy[ix][iy][iz]
+                p[i]=Vector3.new((x-1+off.X)*4-30,(y-1+off.Y)*4-30,(z-1+off.Z)*4-30)
+                d[i]=val;m[i]=mat
+                if val>=.5 then allOut=false else allIn=false end
+            end
+            if not allIn and not allOut then
+                for _,tet in terrainTets do
+                    local inside,outside={},{}
+                    for _,i in tet do if d[i]>=.5 then inside[#inside+1]=i else outside[#outside+1]=i end end
+                    if #inside>0 and #outside>0 then
+                        local function edge(i,j) return p[i]:Lerp(p[j],math.clamp((.5-d[i])/(d[j]-d[i]),0,1)) end
+                        local a=inside[1];local mat=m[a]
+                        if #inside==1 then emit(mat,edge(a,outside[1]),edge(a,outside[2]),edge(a,outside[3]),p[a])
+                        elseif #inside==3 then
+                            local o=outside[1];emit(mat,edge(a,o),edge(inside[2],o),edge(inside[3],o),p[a])
+                        else
+                            local b=inside[2];local c,e=outside[1],outside[2]
+                            local ac,ae,bc,be=edge(a,c),edge(a,e),edge(b,c),edge(b,e)
+                            emit(mat,ac,ae,be,p[a]);emit(mat,ac,be,bc,p[b])
+                        end
+                    end
+                end
+            end
+        end end
+        if x%2==0 then task.wait() end
+    end
+    for mat,verts in groups do
+        if #verts>=3 and terrainMeshBudget>0 and meshCount<256 then
+            local id;repeat id=meshRandom:NextInteger(3,16777215) until not usedMeshIds[id]
+            usedMeshIds[id]=true;meshCount+=1;terrainMeshBudget-=1
+            local entry={id=id,key='terrain:'..id,vertices=verts,size=Vector3.new(side,side,side),state='queued',terrain=true}
+            meshCache[entry.key]=entry;meshQueue[#meshQueue+1]=entry
+            local color=terrain:GetMaterialColor(mat)
+            terrainRows[#terrainRows+1]={entry=entry,part={p=vec(origin+Vector3.new(32,32,32)),r={1,0,0},u={0,1,0},b={0,0,1},s={side,side,side},c={color.R,color.G,color.B},metal=0,rough=.85,emit=0,transmission=0,ior=1.5,shape=id,specular=.3,emissionColor={0,0,0}}}
+        end
+    end
+end
+task.spawn(function()
+    while task.wait(.3) do
+        if active and not terrainStarted then
+            terrainStarted=true
+            local terrain=workspace.Terrain
+            if terrain:GetAttribute('LumenTerrainEnabled')==false then continue end
+            local cam=workspace.CurrentCamera
+            if not cam then terrainStarted=false;continue end
+            local center=terrain:GetAttribute('LumenTerrainCenter')
+            if typeof(center)~='Vector3' then center=cam.CFrame.Position end
+            local radius=terrain:GetAttribute('LumenTerrainRadius')
+            radius=type(radius)=='number' and math.clamp(math.floor(radius/64),1,3) or 2
+            local base=Vector3.new(math.floor(center.X/64)*64,math.floor(center.Y/64)*64,math.floor(center.Z/64)*64)
+            local total=0
+            for r=0,radius do
+                for dx=-r,r do for dz=-r,r do
+                    if math.max(math.abs(dx),math.abs(dz))==r then
+                        for dy=-1,0 do
+                            while not active do task.wait(.25) end
+                            if terrainMeshBudget<=0 then break end
+                            local ok,err=pcall(terrainChunk,base+Vector3.new(dx*64,dy*64,dz*64))
+                            if not ok then warn('[LumenGPU] Terrain chunk: '..tostring(err)) end
+                            total+=1;task.wait()
+                        end
+                    end
+                end end
+            end
+            print('[LumenGPU] Terrain sampled '..total..' chunks; '..#terrainRows..' material meshes queued')
+        end
+    end
+end)
+
 -- Static snapshots are built outside the camera Heartbeat and paced over frames.
 local function refreshWorld()
     local generation=captureGeneration
@@ -454,6 +569,7 @@ local function refreshWorld()
     -- Preserve entries added during this build.
     for _,obj in order do if tracked[obj] and not seen[obj] then seen[obj]=true;compact[#compact+1]=obj;dirty=true end end
     order=compact
+    for _,row in terrainRows do if row.entry.state=='ready' and #static<15360 then static[#static+1]=row.part end end
     local encoded=HTTP:JSONEncode(static)
     if encoded~=lastWorldJSON then
         serial+=1;local id=serial
@@ -728,9 +844,13 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
         end)
     elseif cmd=='lumenusImage' and owner==player then
         if type(data)~='string' or #data>20 or not data:match('^[1-9]%d*$') or type(avatar)~='number' or avatar%1~=0 or avatar<1 or avatar>128 then return end
-        local asset,slot=data,avatar
+        local asset=data
         task.spawn(function()
-            pcall(function() HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/lumenus',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode({kind='image',asset=asset,id=slot})}) end)
+            local ok,res=pcall(function() return HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/lumenus',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode({kind='image',asset=asset,id=0})}) end)
+            if ok and res.Success and owner==player then
+                local good,info=pcall(function() return HTTP:JSONDecode(res.Body) end)
+                if good and info.slot then remote:FireClient(player,'lumenusImageAck',asset,info.slot) end
+            end
         end)
     elseif cmd=='meshBegin' and owner==player then
         if type(data)=='number' and data%1==0 and data>=3 and data<=16777215 and type(avatar)=='number' and avatar%3==0 and avatar>=3 and avatar<=60000 then pendingMesh={id=data,count=avatar,rows={}} end
@@ -839,4 +959,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.9.1 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.9.2 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
