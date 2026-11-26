@@ -79,3 +79,21 @@ func TestAvatarUpdates(t *testing.T) {
  send();if b.state.Scene!=2 {t.Fatal("unchanged avatar rebuilt")}
  avatar=[]Part{};send();if len(b.state.Parts)!=1||b.state.Scene!=3 {t.Fatal("avatar removal")}
 }
+
+func TestFullRangeMeshIDs(t *testing.T){
+ b:=&Bridge{}
+ cam:=Camera{R:V{1,0,0},U:V{0,1,0},F:V{0,0,-1},Fov:70}
+ part:=Part{R:V{1,0,0},U:V{0,1,0},B:V{0,0,1},S:V{1,1,1},C:V{1,1,1}}
+ world,moving,character:=[]Part{part},[]Part{part},[]Part{part}
+ u:=Update{Camera:cam,Sun:V{0,1,0},Parts:&world,Avatar:&moving,Character:&character}
+ post:=func(path string)int{data,_:=json.Marshal(u);w:=httptest.NewRecorder();b.handler().ServeHTTP(w,httptest.NewRequest("POST","http://"+addr+path,strings.NewReader(string(data))));return w.Code}
+ for _,id:=range []float64{-5,0,3,9999999,10000000,12345678,16777215}{
+  world[0].Shape=id;moving[0].Shape=id;character[0].Shape=id
+  if !valid(u)||post("/api/geometry-update")!=204||post("/api/update-controls")!=200{t.Fatalf("rejected valid shape %v: %s",id,updateError(u))}
+ }
+ for _,id:=range []float64{-6,3.5,16777216,math.Inf(1),math.NaN()}{
+  world[0].Shape=id;if valid(u){t.Fatalf("accepted invalid shape %v",id)}
+ }
+ world[0].Shape=16777215;world[0].P[0]=1e7
+ if valid(u){t.Fatal("coordinate bound relaxed")}
+}

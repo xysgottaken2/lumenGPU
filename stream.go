@@ -26,7 +26,8 @@ func(b *Bridge)studioStream(w http.ResponseWriter,r *http.Request,geometry bool)
   c.SetReadDeadline(time.Now().Add(8*time.Second));kind,data,err:=c.ReadMessage();if err!=nil{return};if kind!=websocket.TextMessage{continue}
   var u Update
   c.SetWriteDeadline(time.Now().Add(2*time.Second))
-  if json.Unmarshal(data,&u)!=nil||!valid(u){if c.WriteJSON(map[string]string{"error":"invalid scene update"})!=nil{return};continue}
+  why:="";if json.Unmarshal(data,&u)!=nil{why="invalid scene JSON"}else{why=updateError(u)}
+  if why!=""{if c.WriteJSON(map[string]string{"error":why})!=nil{return};continue}
   ctrl:=b.applyMode(u,!geometry,geometry)
   if c.WriteJSON(ctrl)!=nil{return}
  }

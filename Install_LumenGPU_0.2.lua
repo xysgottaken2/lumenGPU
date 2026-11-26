@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.9.2a)')
+print('[LumenGPU] Client starting (0.9.2b)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -770,6 +770,7 @@ local cameraOpen=false;local geometryOpen=false
 local cameraRetry=0;local geometryRetry=0
 local outstanding=0;local lastCameraAck=0
 local geometryPending=nil
+local geometryRejectedUntil=0;local lastGeometryWarning=-100;local lastCameraWarning=-100
 local function closeCamera()
  local old=cameraWS;cameraWS=nil;cameraOpen=false;outstanding=0;sentCamera=-1
  if old then pcall(function() old:Close() end) end
@@ -791,7 +792,8 @@ local function connectCamera()
   if cameraWS~=c or not owner then return end
   outstanding=math.max(0,outstanding-1);lastCameraAck=os.clock()
   local good,ctrl=pcall(function() return HTTP:JSONDecode(msg) end)
-  if good and type(ctrl)=='table' and not ctrl.error then ctrl.transport='WS';remote:FireClient(owner,'input',ctrl) end
+  if good and type(ctrl)=='table' and not ctrl.error then ctrl.transport='WS';remote:FireClient(owner,'input',ctrl)
+  elseif os.clock()-lastCameraWarning>=2 then lastCameraWarning=os.clock();warn('[LumenGPU] Camera update rejected: '..tostring(good and type(ctrl)=='table' and ctrl.error or 'invalid reply')) end
  end)
  local function failed() if cameraWS==c then closeCamera();cameraRetry=os.clock()+1 end end
  c.Closed:Connect(failed);c.Error:Connect(failed)
@@ -812,7 +814,10 @@ local function connectGeometry()
   local good,reply=pcall(function() return HTTP:JSONDecode(msg) end)
   if good and type(reply)=='table' and not reply.error then
    if packet then if packet.world then lastPartsJSON=packet.world end;if packet.avatar then sentAvatar=packet.avatar end end
-  else lastPartsJSON=nil;sentAvatar=-1;warn('[LumenGPU] Geometry update rejected') end
+  else
+   lastPartsJSON=nil;sentAvatar=-1;geometryRejectedUntil=os.clock()+.5
+   if os.clock()-lastGeometryWarning>=2 then lastGeometryWarning=os.clock();warn('[LumenGPU] Geometry update rejected: '..tostring(good and type(reply)=='table' and reply.error or 'invalid reply')) end
+  end
  end)
  local function failed() if geometryWS==c then closeGeometry();geometryRetry=os.clock()+1 end end
  c.Closed:Connect(failed);c.Error:Connect(failed)
@@ -918,7 +923,7 @@ task.spawn(function()
      local update={camera=latest,character=latestCharacter,sun=latestSun or vec(Lighting:GetSunDirection()),environment=latestEnvironment,hud=hud}
      -- Geometry fallback is owned by the independent geometry task.
      local res=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/update-controls',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode(update)})
-     if not res.Success then error('HTTP '..res.StatusCode) end
+     if not res.Success then error('HTTP '..res.StatusCode..': '..tostring(res.Body):sub(1,180)) end
      if hud then sentHUD=hudSerial end
      if owner then local ctrl=HTTP:JSONDecode(res.Body);ctrl.transport='HTTP';remote:FireClient(owner,'input',ctrl) end
     end
@@ -934,6 +939,7 @@ while task.wait(1/60) do
   local ok,err=pcall(function()
    connectGeometry()
    local now=os.clock()
+   if now<geometryRejectedUntil then return end
    if not geometryOpen then
     if now-lastGeomHTTP<1 then return end
     local update={camera=latest,sun=vec(Lighting:GetSunDirection())};local w,a=nil,nil
@@ -942,7 +948,7 @@ while task.wait(1/60) do
     if not w and not a then return end
     lastGeomHTTP=now
     local res=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/geometry-update',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode(update)})
-    if not res.Success then error('Geometry HTTP '..res.StatusCode) end
+    if not res.Success then geometryRejectedUntil=os.clock()+.5;error('Geometry HTTP '..res.StatusCode..': '..tostring(res.Body):sub(1,180)) end
     if w then lastPartsJSON=w end;if a then sentAvatar=a end
     return
    end
@@ -959,4 +965,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.9.2a Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.9.2b Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')

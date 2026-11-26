@@ -130,3 +130,8 @@ Session disk storage has no aggregate byte cap; per-file 16 MiB, 128 texture slo
 ## V0.9.2a — Draco hotfix
 
 Lumenus decodes V7 COREMESH v2 via the bundled LumenDraco.exe (Google Draco 1.5.7, Apache-2.0). The isolated decoder receives compressed data over stdin and returns bounded vertex/face records over stdout, including mapped UVs. It runs once per V7 mesh request; LOD selection and existing mesh limits still apply. OAuth unchanged. No Python required. Keep LumenDraco.exe alongside LumenBridge.exe. V7 geometry is bind pose only; no bone deformation, layered clothing fitting or classic clothing compositing. Synthetic compression/decompression and bridge integration tests run in CI, real avatar files need Studio testing.
+
+
+## V0.9.2b — scene validation hotfix
+
+All 24-bit mesh IDs are now accepted by scene validation, matching the mesh endpoint. Coordinate/material bounds are unchanged. Rejection messages identify the offending group, row and validation category. Repeated geometry rejection retries are paced; warnings are rate limited. Reinstall the Lua exporter and replace binaries. OAuth, terrain, Draco and disk-cache behavior are unchanged. This fixes a concrete packet rejection bug; actual user scene testing is still necessary.
