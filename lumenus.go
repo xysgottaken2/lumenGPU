@@ -10,6 +10,7 @@ import (
  "fmt"
  "io"
  "math"
+ "log"
  "net/http"
  "net/url"
  "os"
@@ -30,6 +31,7 @@ type assetJob struct { key string; req assetRequest }
 type Lumenus struct {
  mu sync.Mutex
  jobs chan assetJob
+ images chan assetJob
  entries map[string]assetResult
  ids map[uint32]string
  dir,key,imports string
@@ -43,7 +45,7 @@ func newLumenus(b *Bridge, root string) (*Lumenus,error) {
  if err:=os.MkdirAll(root,0700);err!=nil{return nil,err}
  dir,err:=os.MkdirTemp(root,"session-");if err!=nil{return nil,err}
  ctx,cancel:=context.WithCancel(context.Background())
- l:=&Lumenus{jobs:make(chan assetJob,256),entries:map[string]assetResult{},ids:map[uint32]string{},dir:dir,key:os.Getenv("LUMEN_ASSET_API_KEY"),imports:filepath.Join(filepath.Dir(root),"AssetImports"),ctx:ctx,cancel:cancel,bridge:b}
+ l:=&Lumenus{jobs:make(chan assetJob,256),images:make(chan assetJob,128),entries:map[string]assetResult{},ids:map[uint32]string{},dir:dir,key:os.Getenv("LUMEN_ASSET_API_KEY"),imports:filepath.Join(filepath.Dir(root),"AssetImports"),ctx:ctx,cancel:cancel,bridge:b}
  l.wg.Add(1);go l.worker();return l,nil
 }
 func(l *Lumenus)close(){l.cancel();l.wg.Wait();os.RemoveAll(l.dir)}
@@ -64,25 +66,30 @@ func(l *Lumenus)handler(w http.ResponseWriter,r *http.Request){
   if prior,found:=l.ids[a.ID];found&&prior!=key{http.Error(w,"mesh ID collision",409);return}
   // One renderer ID per asset in this session. Client already deduplicates.
   key=key+":"+strconv.FormatUint(uint64(a.ID),10)
-  if prior,found:=l.ids[a.ID];found&&prior!=strings.TrimSuffix(key,":"+strconv.FormatUint(uint64(a.ID),10)){http.Error(w,"mesh ID collision",409);return}
  }
  result,found:=l.entries[key]
  if !found {
-  if len(l.entries)>=256{http.Error(w,"session asset cap",429);return}
-  select{case l.jobs<-assetJob{key,a}:result=assetResult{Status:"queued"};l.entries[key]=result;if a.Kind=="mesh"{l.ids[a.ID]="mesh:"+a.Asset}
+  if len(l.entries)>=384{http.Error(w,"session asset cap",429);return}
+  queue:=l.jobs;if a.Kind=="image"{queue=l.images}
+  select{case queue<-assetJob{key,a}:result=assetResult{Status:"queued"};l.entries[key]=result;if a.Kind=="mesh"{l.ids[a.ID]="mesh:"+a.Asset}
   default:http.Error(w,"queue full",429);return}
  }
  w.Header().Set("Content-Type","application/json");w.Header().Set("Cache-Control","no-store");json.NewEncoder(w).Encode(result)
 }
 func(l *Lumenus)worker(){
  defer l.wg.Done()
- for {select{case <-l.ctx.Done():return;case j:=<-l.jobs:
+ for {
+  var j assetJob
+  select{case <-l.ctx.Done():return;case j=<-l.jobs:default:
+   select{case <-l.ctx.Done():return;case j=<-l.jobs:case j=<-l.images:}
+  }
   if l.ctx.Err()!=nil{return}
   result:=l.process(j.req)
   l.mu.Lock();l.entries[j.key]=result;l.mu.Unlock()
+  log.Printf("[Lumenus] %s %s: %s %s",j.req.Kind,j.req.Asset,result.Status,result.Detail)
   // Pace remote requests; never busy-loop on rejected assets.
   select{case <-l.ctx.Done():return;case <-time.After(250*time.Millisecond):}
- }}
+ }
 }
 func readLimited(r io.Reader,n int64)([]byte,error){
  data,e:=io.ReadAll(io.LimitReader(r,n+1));if e!=nil{return nil,e};if int64(len(data))>n{return nil,fmt.Errorf("asset too large")};return data,nil
@@ -117,19 +124,20 @@ func(l *Lumenus)fetch(a assetRequest)([]byte,error){
  return readLimited(res2.Body,assetLimit)
 }
 func(l *Lumenus)process(a assetRequest)assetResult{
- data,e:=l.fetch(a);if e!=nil{return assetResult{Status:"failed",Detail:e.Error()}}
- if l.used+int64(len(data))>128<<20{return assetResult{Status:"failed",Detail:"session disk cap"}}
+ cachePath:=filepath.Join(l.dir,a.Kind+"-"+a.Asset+".bin")
+ data,e:=os.ReadFile(cachePath);cached:=e==nil
+ if !cached{data,e=l.fetch(a)}
+ if e!=nil{return assetResult{Status:"failed",Detail:e.Error()}}
+ if !cached&&l.used+int64(len(data))>128<<20{return assetResult{Status:"failed",Detail:"session disk cap"}}
  if a.Kind=="image" {
   cfg,_,e:=image.DecodeConfig(bytes.NewReader(data));if e!=nil||cfg.Width<1||cfg.Height<1||cfg.Width>8192||cfg.Height>8192{return assetResult{Status:"failed",Detail:"unsupported image format or dimensions"}}
-  if e=os.WriteFile(filepath.Join(l.dir,"image-"+a.Asset+".bin"),data,0600);e!=nil{return assetResult{Status:"failed",Detail:"cache write failed"}}
-  l.used+=int64(len(data));return assetResult{Status:"cached",Detail:"image cached; GPU texture mapping not implemented"}
+  if !cached {if e=os.WriteFile(cachePath,data,0600);e!=nil{return assetResult{Status:"failed",Detail:"cache write failed"}};l.used+=int64(len(data))};return assetResult{Status:"cached",Detail:"image cached; GPU texture mapping not implemented"}
  }
  vs,size,e:=decodeLumenMesh(data);if e!=nil{return assetResult{Status:"failed",Detail:e.Error()}}
  m:=MeshUpload{ID:a.ID,Vertices:vs};if !meshValid(m){return assetResult{Status:"failed",Detail:"invalid normalized mesh"}}
  b:=l.bridge;b.mu.Lock();defer b.mu.Unlock()
  if _,ok:=b.meshes[a.ID];ok||len(b.meshes)>=256||b.meshVertices+len(vs)>meshTotalVertices{return assetResult{Status:"failed",Detail:"mesh ID collision or cache full"}}
- if e=os.WriteFile(filepath.Join(l.dir,"mesh-"+a.Asset+".bin"),data,0600);e!=nil{return assetResult{Status:"failed",Detail:"cache write failed"}}
- l.used+=int64(len(data));if b.meshes==nil{b.meshes=map[uint32][]V{}};b.meshes[a.ID]=vs;b.meshVertices+=len(vs)
+ if !cached {if e=os.WriteFile(cachePath,data,0600);e!=nil{return assetResult{Status:"failed",Detail:"cache write failed"}};l.used+=int64(len(data))};if b.meshes==nil{b.meshes=map[uint32][]V{}};b.meshes[a.ID]=vs;b.meshVertices+=len(vs)
  return assetResult{Status:"ready",Size:size}
 }
 // Decode rigid FileMesh v2/v3 and v4/v5 geometry. Skinned meshes are
