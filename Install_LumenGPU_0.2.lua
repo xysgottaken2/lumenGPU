@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.9.3)')
+print('[LumenGPU] Client starting (0.9.4)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -156,8 +156,8 @@ local resolvedImages={}
 local imageScanned=setmetatable({},{__mode='k'})
 local function numericAsset(uri)
     if type(uri)~='string' then return nil end
-    local id=uri:match('^rbxassetid://(%d+)$')
-    if not id then id=uri:match('^https?://www%.roblox%.com/asset/%?id=(%d+)$') or uri:match('^https?://www%.roblox%.com/asset%?id=(%d+)$') end
+    local id=uri:match('^rbxassetid://(%d+)$') or uri:match('^(%d+)$')
+    if not id then id=uri:match('^https?://www%.roblox%.com/asset/?%?id=(%d+)$') or uri:match('^https?://www%.roblox%.com/asset/?%?id=(%d+)&') or uri:match('^https?://assetdelivery%.roblox%.com/v1/asset/?%?id=(%d+)$') end
     if id and #id<=20 and not id:match('^0') then return id end
     return nil
 end
@@ -171,6 +171,7 @@ end
 local faceCode={[Enum.NormalId.Right]=1,[Enum.NormalId.Left]=2,[Enum.NormalId.Top]=3,[Enum.NormalId.Bottom]=4,[Enum.NormalId.Back]=5,[Enum.NormalId.Front]=6}
 local bodyNames={Head='Head',Torso='Torso',LeftArm='Left Arm',RightArm='Right Arm',LeftLeg='Left Leg',RightLeg='Right Leg'}
 local function characterMesh(obj)
+    if obj.Name~='Head' and obj.Name~='Torso' and obj.Name~='Left Arm' and obj.Name~='Right Arm' and obj.Name~='Left Leg' and obj.Name~='Right Leg' then return nil end
     local char=obj.Parent
     if not char or not char:FindFirstChildOfClass('Humanoid') then return nil end
     for _,item in char:GetChildren() do
@@ -186,7 +187,7 @@ local function discoverImages(obj)
     local surface=obj:FindFirstChildOfClass('SurfaceAppearance')
     if surface then local color=discoverImage(surface.ColorMap);if color>0 then slot=color end end
     local cm=characterMesh(obj)
-    if cm then local base=discoverImage('rbxassetid://'..tostring(cm.BaseTextureId));local overlay=discoverImage('rbxassetid://'..tostring(cm.OverlayTextureId));if overlay>0 then slot=overlay elseif base>0 then slot=base end end
+    if cm then local base=discoverImage('rbxassetid://'..tostring(cm.BaseTextureId));local overlay=discoverImage('rbxassetid://'..tostring(cm.OverlayTextureId));if base>0 then slot=base elseif overlay>0 then slot=overlay end end
     if slot>0 then return {slot,0,1,1,0,0,1,0} end
     if (obj:IsA('Part') and obj.Shape==Enum.PartType.Block) or obj:IsA('SpawnLocation') then
         for _,child in obj:GetChildren() do
@@ -222,27 +223,30 @@ end)
 local function meshEntry(obj)
     local content,key,special
     local cm=characterMesh(obj)
-    if cm and cm.MeshId>0 then
-        key='rbxassetid://'..tostring(cm.MeshId);content=Content.fromUri(key)
+    if cm and tonumber(cm.MeshId) and tonumber(cm.MeshId)>0 then
+        key='rbxassetid://'..tostring(cm.MeshId)
     elseif obj:IsA('MeshPart') then
-        content=obj.MeshContent
         key=obj.MeshId~='' and obj.MeshId or obj
+        local ok,value=pcall(function() return obj.MeshContent end);if ok then content=value end
     else
         special=obj:FindFirstChildOfClass('SpecialMesh')
         if not special or special.MeshType~=Enum.MeshType.FileMesh or special.MeshId=='' then return nil end
-        key=special.MeshId;content=Content.fromUri(key)
+        key=special.MeshId
     end
+    if not content and type(key)=='string' then local ok,value=pcall(function() return Content.fromUri(key) end);if ok then content=value end end
+    if not key then return nil end
     local entry=meshCache[key]
     if not entry and meshCount<256 then
         local id
         repeat id=meshRandom:NextInteger(3,16777215) until not usedMeshIds[id]
         usedMeshIds[id]=true;meshCount+=1
-        entry={id=id,key=key,content=content,state='queued'}
+        entry={id=id,key=key,content=content,state='queued',bodyPackage=cm~=nil}
         meshCache[key]=entry;meshQueue[#meshQueue+1]=entry
     end
     return entry,special
 end
 local function extractMesh(entry)
+    if not entry.content then error('No readable mesh Content; using authorized asset fallback') end
     local editable=Assets:CreateEditableMeshAsync(entry.content,{FixedSize=true})
     if not editable then error('EditableMesh allocation failed') end
     local ok,verts,size=pcall(function()
@@ -367,6 +371,30 @@ local function extraMaterial(obj,tex)
     return {packed,n,r,m,tex and math.clamp(gen,0,1) or 0,spawn,0,0}
 end
 local extraScanned=setmetatable({},{__mode='k'})
+-- Classic garment atlas: torso=1, right limb=2, left limb=3.
+local garmentRegions={
+ ['Torso']={1,0,1},['Right Arm']={2,0,1},['Left Arm']={3,0,1},['Right Leg']={2,0,1},['Left Leg']={3,0,1},
+ UpperTorso={1,0,.6},LowerTorso={1,.6,.4},
+ RightUpperArm={2,0,.4},RightLowerArm={2,.4,.4},RightHand={2,.8,.2},LeftUpperArm={3,0,.4},LeftLowerArm={3,.4,.4},LeftHand={3,.8,.2},
+ RightUpperLeg={2,0,.4},RightLowerLeg={2,.4,.4},RightFoot={2,.8,.2},LeftUpperLeg={3,0,.4},LeftLowerLeg={3,.4,.4},LeftFoot={3,.8,.2}
+}
+local function garmentData(obj)
+    local region=garmentRegions[obj.Name]
+    local char=obj.Parent
+    if not char or not char:FindFirstChildOfClass('Humanoid') then return nil end
+    local cm=characterMesh(obj)
+    local overlay=cm and discoverImage('rbxassetid://'..tostring(cm.OverlayTextureId)) or 0
+    if not region then return overlay>0 and {0,0,0,overlay,0,0,0,0} or nil end
+    local shirt,pants,graphic=0,0,0
+    local torso=region[1]==1
+    local leg=obj.Name:find('Leg')~=nil or obj.Name:find('Foot')~=nil
+    local sh=char:FindFirstChildOfClass('Shirt');local pa=char:FindFirstChildOfClass('Pants');local gr=char:FindFirstChildOfClass('ShirtGraphic')
+    if sh and not leg then shirt=discoverImage(sh.ShirtTemplate) end
+    if pa and (torso or leg) then pants=discoverImage(pa.PantsTemplate) end
+    if gr and torso then graphic=discoverImage(gr.Graphic) end
+    if shirt==0 and pants==0 and graphic==0 and overlay==0 then return nil end
+    return {shirt,pants,graphic,overlay,region[1],region[2],region[3],0}
+end
 local function materialPart(obj)
     local function num(k,v,lo,hi)
         local x=obj:GetAttribute(k);if type(x)~='number' or x~=x then return v end;return math.clamp(x,lo,hi)
@@ -398,32 +426,54 @@ local function materialPart(obj)
         if special then
             c=c*CFrame.new(special.Offset);size=e.size*special.Scale
         elseif obj:IsA('MeshPart') then
-            local ms=obj.MeshSize;size=Vector3.new(size.X*e.size.X/math.max(ms.X,.0001),size.Y*e.size.Y/math.max(ms.Y,.0001),size.Z*e.size.Z/math.max(ms.Z,.0001))
+            local ok,ms=pcall(function() return obj.MeshSize end)
+            if ok and typeof(ms)=='Vector3' and ms.Magnitude>.001 then size=Vector3.new(size.X*e.size.X/math.max(ms.X,.0001),size.Y*e.size.Y/math.max(ms.Y,.0001),size.Z*e.size.Z/math.max(ms.Z,.0001)) end
+        elseif e.bodyPackage then
+            local standard=obj.Name=='Torso' and Vector3.new(2,2,1) or obj.Name=='Head' and Vector3.new(2,1,1) or Vector3.new(1,2,1)
+            size=e.size*(obj.Size/standard)
         end
         size=Vector3.new(math.max(size.X,.0001),math.max(size.Y,.0001),math.max(size.Z,.0001))
     end
-    return {p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(size),c={color.R,color.G,color.B},metal=num('PathMetallic',metal,0,1),rough=num('PathRoughness',rough,.025,1),emit=num('PathEmission',(obj:GetAttribute('PathEmissive')==true or mat==Enum.Material.Neon) and 4 or 0,0,50),transmission=num('PathTransmission',mat==Enum.Material.Glass and 1 or obj.Transparency,0,1),ior=num('PathIOR',1.5,1.001,3),shape=shape,specular=num('PathSpecular',1,0,1),emissionColor={ec.R,ec.G,ec.B},tex=tex or nil,extra=ex}
+    return {p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(size),c={color.R,color.G,color.B},metal=num('PathMetallic',metal,0,1),rough=num('PathRoughness',rough,.025,1),emit=num('PathEmission',(obj:GetAttribute('PathEmissive')==true or mat==Enum.Material.Neon) and 4 or 0,0,50),transmission=num('PathTransmission',mat==Enum.Material.Glass and 1 or obj.Transparency,0,1),ior=num('PathIOR',1.5,1.001,3),shape=shape,specular=num('PathSpecular',1,0,1),emissionColor={ec.R,ec.G,ec.B},tex=tex or nil,extra=ex,cloth=garmentData(obj)}
 end
-local lastClothingScan=-100
+local cachedCharacter={}
+local lastAvatarWarning=setmetatable({},{__mode='k'})
+local function avatarFallback(obj)
+    local c,s,col=obj.CFrame,obj.Size,obj.Color
+    return {p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(s),c={col.R,col.G,col.B},metal=0,rough=.65,emit=0,transmission=0,ior=1.5,shape=0,specular=1,emissionColor={0,0,0}}
+end
 local function avatarSnapshot()
     local list={};local char=player.Character;if not char then return list end
-    if os.clock()-lastClothingScan>3 then
-        lastClothingScan=os.clock()
-        for _,item in char:GetChildren() do
-            if item:IsA('Shirt') then discoverImage(item.ShirtTemplate)
-            elseif item:IsA('Pants') then discoverImage(item.PantsTemplate)
-            elseif item:IsA('ShirtGraphic') then discoverImage(item.Graphic)
-            elseif item:IsA('CharacterMesh') then discoverImage('rbxassetid://'..tostring(item.BaseTextureId));discoverImage('rbxassetid://'..tostring(item.OverlayTextureId)) end
-        end
-        for _,item in char:GetDescendants() do if item:IsA('BasePart') then imageScanned[item]=nil end end
-    end
     for _,obj in char:GetDescendants() do
         if obj:IsA('BasePart') and obj.Name~='HumanoidRootPart' and obj.Transparency<.95 and obj:GetAttribute('PathIgnore')~=true and #list<64 then
-            list[#list+1]=materialPart(obj)
+            local ok,row=pcall(materialPart,obj)
+            if not ok then
+                local now=os.clock()
+                if now-(lastAvatarWarning[obj] or -100)>10 then lastAvatarWarning[obj]=now;warn('[LumenGPU] Avatar part '..obj.Name..': '..tostring(row)) end
+                ok,row=pcall(avatarFallback,obj)
+            end
+            if ok and row then list[#list+1]=row end
         end
     end
     return list
 end
+-- Avatar capture runs independently. Camera packets never wait for body conversion.
+task.spawn(function()
+    local lastScan=-100
+    while task.wait(1/30) do
+        if active then
+            if os.clock()-lastScan>3 then
+                lastScan=os.clock()
+                local char=player.Character
+                if char then for _,obj in char:GetDescendants() do if obj:IsA('BasePart') then imageScanned[obj]=nil end end end
+            end
+            local ok,rows=pcall(avatarSnapshot)
+            if ok then cachedCharacter=rows end
+        else cachedCharacter={} end
+    end
+end)
+player.CharacterAdded:Connect(function() cachedCharacter={} end)
+player.CharacterRemoving:Connect(function() cachedCharacter={} end)
 -- Capture the actual local viewport's world, including client-only parts.
 local HTTP=game:GetService('HttpService')
 local order,tracked,dynamic={},{},{}
@@ -789,7 +839,7 @@ local elapsed=0
 local fastElapsed=0
 RunService:BindToRenderStep('LumenGPU_ExternalCamera',Enum.RenderPriority.Camera.Value+1,function(dt)
     if not active then return end
-    updateCamera()
+    pcall(updateCamera)
     hudElapsed+=dt
     if hudElapsed>=.1 then
         hudElapsed=0;local cam=workspace.CurrentCamera
@@ -804,7 +854,7 @@ RunService:BindToRenderStep('LumenGPU_ExternalCamera',Enum.RenderPriority.Camera
     local environment={clock=LocalLighting.ClockTime,sunSize=sky and sky.SunAngularSize or 11,brightness=LocalLighting.Brightness,celestial=not sky or sky.CelestialBodiesShown,firstPerson=hideAvatar==true}
     if fastElapsed>=1/30 then fastElapsed=fastElapsed%(1/30);fast=fastSnapshot() end
     -- Character and camera are sampled during the same render step.
-    remote:FireServer('camera',{p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),f=vec(c.LookVector),fov=cam.FieldOfView,sun=vec(LocalLighting:GetSunDirection()),environment=environment},avatarSnapshot(),fast)
+    remote:FireServer('camera',{p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),f=vec(c.LookVector),fov=cam.FieldOfView,sun=vec(LocalLighting:GetSunDirection()),environment=environment},cachedCharacter,fast)
 end)
 RunService.Heartbeat:Connect(function()
     if not active then return end
@@ -959,10 +1009,9 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
     elseif cmd=='hud' and owner==player and type(data)=='table' and #data<=256 then latestHUD=data;hudSerial+=1
     elseif cmd=='camera' and owner==player and type(data)=='table' then
         if type(data.p)=='table' and #data.p==3 and type(data.r)=='table' and #data.r==3 and type(data.u)=='table' and #data.u==3 and type(data.f)=='table' and #data.f==3 and type(data.fov)=='number' then
-            if type(avatar)=='table' and #avatar<=64 then
-                latest=data;latestCharacter=avatar;cameraSerial+=1
-                latestEnvironment=data.environment;latestSun=data.sun
-            end
+            latest=data;cameraSerial+=1
+            latestEnvironment=data.environment;latestSun=data.sun
+            if type(avatar)=='table' and #avatar<=64 then latestCharacter=avatar end
             if type(moving)=='table' and #moving<=1024 then latestAvatar=moving;avatarSerial+=1 end
         end
     end
@@ -1038,4 +1087,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.9.3 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.9.4 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')

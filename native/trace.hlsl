@@ -1,5 +1,5 @@
 RaytracingAccelerationStructure scene : register(t0);
-struct Material {float4 colorMetal,roughEmit,ax,ay,az,scaleSpec,emitColor,tex0,tex1,extra0,extra1;};
+struct Material {float4 colorMetal,roughEmit,ax,ay,az,scaleSpec,emitColor,tex0,tex1,extra0,extra1,cloth0,cloth1;};
 StructuredBuffer<Material> mats : register(t1);
 StructuredBuffer<float3> meshNormals : register(t2);
 RWStructuredBuffer<float4> history : register(u0);
@@ -18,14 +18,18 @@ float rnd(inout uint s){s=hash(s+0x9e3779b9u);return float(s>>8)*(1.0/16777216.0
 float3 basis(float3 n,float x,float y,float z){float3 t=normalize(cross(abs(n.y)>.95?float3(1,0,0):float3(0,1,0),n));return normalize(t*x+cross(n,t)*y+n*z);}
 float3 cosine(float3 n,inout uint s){float phi=2*PI*rnd(s),r=sqrt(rnd(s));return basis(n,r*cos(phi),r*sin(phi),sqrt(max(0,1-r*r)));}
 float3 linearColor(float3 c){c=saturate(c);return lerp(c/12.92,pow((c+.055)/1.055,2.4),step(.04045,c));}
-float4 assetTexel(uint base,uint2 p){uint v=sunPixels[base+p.y*256+p.x];return float4(v&255u,(v>>8)&255u,(v>>16)&255u,(v>>24)&255u)/255.;}
-float4 assetSample(uint base,float2 uv,bool wrap){
- float2 coord=wrap?frac(uv)*256-.5:saturate(uv)*255;
- int2 a=int2(floor(coord)),b=a+1;float2 f=frac(coord);
- uint2 p0=wrap?uint2(a&255):uint2(clamp(a,0,255));
- uint2 p1=wrap?uint2(b&255):uint2(clamp(b,0,255));
- return lerp(lerp(assetTexel(base,p0),assetTexel(base,uint2(p1.x,p0.y)),f.x),lerp(assetTexel(base,uint2(p0.x,p1.y)),assetTexel(base,p1),f.x),f.y);
+float4 assetTexel(uint base,uint2 p,uint side){uint v=sunPixels[base+p.y*side+p.x];return float4(v&255u,(v>>8)&255u,(v>>16)&255u,(v>>24)&255u)/255.;}
+float4 assetSampleLod(uint base,float2 uv,bool wrap,float lod){
+ uint level=uint(clamp(round(lod),0.,8.));uint side=256u>>level;
+ // Sum previous square levels (256^2 + 128^2 + ...).
+ base+=(65536u-side*side)*4u/3u;
+ float2 coord=wrap?frac(uv)*side-.5:saturate(uv)*(side-1u);
+ int2 a=int2(floor(coord)),b=a+1;float2 f=frac(coord);int mask=int(side-1u);
+ uint2 p0=wrap?uint2(a&mask):uint2(clamp(a,0,mask));
+ uint2 p1=wrap?uint2(b&mask):uint2(clamp(b,0,mask));
+ return lerp(lerp(assetTexel(base,p0,side),assetTexel(base,uint2(p1.x,p0.y),side),f.x),lerp(assetTexel(base,uint2(p0.x,p1.y),side),assetTexel(base,p1,side),f.x),f.y);
 }
+float4 assetSample(uint base,float2 uv,bool wrap){return assetSampleLod(base,uv,wrap,0);}
 uint visualFlags(){return uint(max(0.,-1-environment.w));}
 float2 faceUV(uint face,float3 p){
  if(face==1)return float2(-p.z,-p.y)+.5;
@@ -49,8 +53,46 @@ float3 bumpNormal(float3 n,float3 t,float3 b,float2 grad){
  return normalize(n+t*grad.x+b*grad.y);
 }
 float luma(float3 c){return dot(c,float3(.2126,.7152,.0722));}
-void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,inout float3 n,out float3 c,inout float rough,inout float metal){
+uint clothingFace(float3 n){
+ float3 a=abs(n);if(a.x>=a.y&&a.x>=a.z)return n.x>=0?1u:2u;
+ if(a.y>=a.z)return n.y>=0?3u:4u;return n.z>=0?5u:6u;
+}
+float4 clothingRect(uint region,uint face){
+ if(region==1){if(face==1)return float4(165,74,64,128);if(face==2)return float4(361,74,64,128);if(face==3)return float4(231,8,128,64);if(face==4)return float4(231,204,128,64);if(face==5)return float4(427,74,128,128);return float4(231,74,128,128);}
+ if(region==2){if(face==1)return float4(151,355,64,128);if(face==2)return float4(19,355,64,128);if(face==3)return float4(217,289,64,64);if(face==4)return float4(217,485,64,64);if(face==5)return float4(85,355,64,128);return float4(217,355,64,128);}
+ if(face==1)return float4(506,355,64,128);if(face==2)return float4(374,355,64,128);if(face==3)return float4(308,289,64,64);if(face==4)return float4(308,485,64,64);if(face==5)return float4(440,355,64,128);return float4(308,355,64,128);
+}
+float3 clothingBlend(float3 c,float slot,float2 uv,float lod){
+ if(slot<=0)return c;float4 v=assetSampleLod(uint(slot),uv,false,lod);return lerp(c,linearColor(v.rgb),v.a);
+}
+float3 applyClothes(Material m,uint primitive,uint shape,float3 lp,float2 bary,float3 c,float lod){
+ if(m.cloth0.w>0&&m.az.w>0){
+  uint at=uint(m.az.w)+primitive*3;float2 uv=meshNormals[at].xy*(1-bary.x-bary.y)+meshNormals[at+1].xy*bary.x+meshNormals[at+2].xy*bary.y;
+  c=clothingBlend(c,m.cloth0.w,uv,lod);
+ }
+ uint region=uint(m.cloth1.x);if(region==0)return c;
+ uint face=shape==0?primitive/2+1:shape==3?clothingFace(meshNormals[uint(m.ay.w)+primitive*6]):clothingFace(lp);
+ if(face<1||face>6)return c;
+ float2 uv=saturate(faceUV(face,lp));
+ // Split the vertical atlas span among articulated R15 segments.
+ if(face!=3&&face!=4)uv.y=m.cloth1.y+uv.y*m.cloth1.z;
+ if(face==3&&m.cloth1.y>.001)return c;
+ if(face==4&&m.cloth1.y+m.cloth1.z<.999)return c;
+ float4 rect=clothingRect(region,face);
+ float2 atlasUV=(rect.xy+1+uv*(rect.zw-2))/float2(585,559);
+ c=clothingBlend(c,m.cloth0.y,atlasUV,min(lod,2));
+ c=clothingBlend(c,m.cloth0.x,atlasUV,min(lod,2));
+ if(region==1&&face==6&&m.cloth0.z>0){
+  float2 graphicUV=float2(uv.x,(uv.y-.08)/.65);
+  if(all(graphicUV>=0)&&all(graphicUV<=1))c=clothingBlend(c,m.cloth0.z,graphicUV,min(lod,2));
+ }
+ return c;
+}
+void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,float distance,inout float3 n,out float3 c,inout float rough,inout float metal){
  c=linearColor(m.colorMetal.xyz);float2 uv;
+ float scale=max(.1,max(m.scaleSpec.x,max(m.scaleSpec.y,m.scaleSpec.z)));
+ if(shape==0){uint face=primitive/2+1;scale=max(.1,face<=2?min(m.scaleSpec.z,m.scaleSpec.y):face<=4?min(m.scaleSpec.x,m.scaleSpec.z):min(m.scaleSpec.x,m.scaleSpec.y));}
+ float lod=right.w<0?0:clamp(log2(max(1.,distance*2*eye.w*256*max(1.,max(abs(m.tex0.z),abs(m.tex0.w)))/(dims.y*scale))),0.,8.);
  bool hasUV=materialUV(m,primitive,lp,bary,uv);
  float3 t=m.ax.xyz,b=m.az.xyz;
  if(shape==3){uint at=uint(m.ay.w)+primitive*6;t=tangentWorld(m,meshNormals[at+4]);b=tangentWorld(m,meshNormals[at+5]);}
@@ -78,25 +120,26 @@ void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,
    c=lerp(c,float3(.055,.055,.055),mark*.85);
   }
  }
- if(!hasUV)return;
+ if(!hasUV){c=applyClothes(m,primitive,shape,lp,bary,c,lod);return;}
  bool wrap=m.tex1.w>0;
  if(m.tex0.x>0){
-  float4 tex=assetSample(uint(m.tex0.x),uv,wrap);float3 tc=linearColor(tex.rgb);
+  float4 tex=assetSampleLod(uint(m.tex0.x),uv,wrap,lod);float3 tc=linearColor(tex.rgb);
   c=lerp(c,m.tex0.y==0?c*tc:tc,saturate(tex.a*m.tex1.z));
  }
- if(m.extra0.z>0)rough=clamp(assetSample(uint(m.extra0.z),uv,wrap).r,.025,1);
- if(m.extra0.w>0)metal=saturate(assetSample(uint(m.extra0.w),uv,wrap).r);
+ if(m.extra0.z>0)rough=clamp(assetSampleLod(uint(m.extra0.z),uv,wrap,lod).r,.025,1);
+ if(m.extra0.w>0)metal=saturate(assetSampleLod(uint(m.extra0.w),uv,wrap,lod).r);
  if(m.extra0.y>0){
-  float3 nn=assetSample(uint(m.extra0.y),uv,wrap).xyz*2-1;
+  float3 nn=assetSampleLod(uint(m.extra0.y),uv,wrap,lod).xyz*2-1;
   n=bumpNormal(n,t,b,nn.xy/max(.2,nn.z));
  }else if((visualFlags()&128u)!=0&&m.extra1.x>0&&m.tex0.x>0){
-  uint off=uint(m.tex0.x);float stepUV=1./256.;
-  float h=luma(assetSample(off,uv,wrap).rgb);
-  float hx=luma(assetSample(off,uv+float2(stepUV,0),wrap).rgb)-h;
-  float hy=luma(assetSample(off,uv+float2(0,stepUV),wrap).rgb)-h;
-  n=bumpNormal(n,t,b,-float2(hx,hy)*m.extra1.x*3);
-  if(m.extra0.z<=0)rough=clamp(lerp(rough,.3+.6*(1-h),m.extra1.x),.025,1);
+  uint off=uint(m.tex0.x);float stepUV=exp2(round(lod))/256.;
+  float h=luma(assetSampleLod(off,uv,wrap,lod).rgb);
+  float hx=luma(assetSampleLod(off,uv+float2(stepUV,0),wrap,lod).rgb)-h;
+  float hy=luma(assetSampleLod(off,uv+float2(0,stepUV),wrap,lod).rgb)-h;
+  n=bumpNormal(n,t,b,-float2(hx,hy)*m.extra1.x*3*max(0.,abs(right.w)-(right.w<0?.001:0)));
+  if(m.extra0.z<=0)rough=clamp(lerp(rough, .3+.6*(1-h),saturate(m.extra1.x*up.w)),.025,1);
  }
+ c=applyClothes(m,primitive,shape,lp,bary,c,lod);
 }
 float daylight(){return smoothstep(-.16,.12,sun.y);}
 float sunPower(){return smoothstep(-.035,.08,sun.y)*quality.z*environment.z;}
@@ -162,16 +205,27 @@ float3 evalBSDF(float3 n,float3 wo,float3 wi,float3 base,float metal,float rough
  pdf=(1-q)*nl/PI+q*D*nh/(4*vh);
  return diffuse+glossy;
 }
+float localLightWeight(Material l,float3 p,float3 gn,float3 n,out float3 wi,out float dist,out float attenuation){
+ float3 delta=l.ax.xyz-p;dist=length(delta);wi=0;attenuation=0;
+ if(dist<.006||dist>=l.roughEmit.x)return 0;
+ wi=delta/dist;float nl=dot(n,wi);if(nl<=0||dot(gn,wi)<=0)return 0;
+ float cone=1;if(l.extra1.z>1){float cosA=dot(-wi,l.ay.xyz);cone=smoothstep(l.extra1.w-.001,min(1.,l.extra1.w+.08),cosA);if(l.extra1.z==3)cone*=saturate(cosA);}
+ attenuation=pow(saturate(1-dist/l.roughEmit.x),2)*l.roughEmit.y*12/(1+dist*dist)*cone;
+ return attenuation*nl*max(.001,luma(linearColor(l.colorMetal.xyz)));
+}
 float3 sampleLocalLight(float3 p,float3 gn,float3 n,float3 wo,float3 c,float metal,float rough,float ior,float spec,float prob,inout uint seed){
  uint flags=visualFlags(),count=flags&127u;if(count==0)return 0;
- uint at=(flags>>9)+min(count-1,uint(rnd(seed)*count));Material l=mats[at];
- float3 delta=l.ax.xyz-p;float dist=length(delta);if(dist<.006||dist>=l.roughEmit.x)return 0;
- float3 wi=delta/dist;float nl=dot(n,wi);if(nl<=0||dot(gn,wi)<=0)return 0;
- float cone=1;if(l.extra1.z>1){float cosA=dot(-wi,l.ay.xyz);cone=smoothstep(l.extra1.w-.001,min(1.,l.extra1.w+.08),cosA);if(l.extra1.z==3)cone*=saturate(cosA);}
- if(cone<=0)return 0;
- float attenuation=pow(saturate(1-dist/l.roughEmit.x),2)*l.roughEmit.y*12/(1+dist*dist);
+ uint base=flags>>9,k=min(count,4u),selected=base;float sum=0,chosenWeight=0;
+ [loop]for(uint j=0;j<k;++j){
+  uint at=base+(count<=4?j:min(count-1,uint(rnd(seed)*count)));
+  float3 wi;float dist,attenuation;float w=localLightWeight(mats[at],p,gn,n,wi,dist,attenuation);
+  if(w<=0)continue;sum+=w;if(rnd(seed)*sum<w){selected=at;chosenWeight=w;}
+ }
+ if(chosenWeight<=0)return 0;
+ Material l=mats[selected];float3 wi;float dist,attenuation;
+ float selectedCheck=localLightWeight(l,p,gn,n,wi,dist,attenuation);if(selectedCheck<=0)return 0;
  float pdf;float3 f=evalBSDF(n,wo,wi,c,metal,rough,ior,spec,prob,pdf);
- return f*nl*linearColor(l.colorMetal.xyz)*attenuation*cone*count*lightVisibilityTo(p+gn*.003,wi,max(.001,dist-.007));
+ return f*dot(n,wi)*linearColor(l.colorMetal.xyz)*attenuation*(float(count)*sum/(float(k)*chosenWeight))*lightVisibilityTo(p+gn*.003,wi,max(.001,dist-.007));
 }
 float3 sunDirection(inout uint seed){float r=sqrt(rnd(seed))*sun.w,phi=2*PI*rnd(seed);return basis(normalize(sun.xyz),r*cos(phi),r*sin(phi),1);}
 float3 path(float3 o,float3 d,inout uint seed,out float4 guide,out float4 alb){
@@ -193,7 +247,7 @@ float3 path(float3 o,float3 d,inout uint seed,out float4 guide,out float4 alb){
   if(shape==3){uint at=uint(m.ay.w)+primitive*6;float3 sn=meshNormals[at+1]*(1-bary.x-bary.y)+meshNormals[at+2]*bary.x+meshNormals[at+3]*bary.y;sn/=max(m.scaleSpec.xyz,.0001);sn=normalize(m.ax.xyz*sn.x+m.ay.xyz*sn.y+m.az.xyz*sn.z);if(!entering)sn=-sn;if(dot(sn,orientedGN)>0&&dot(sn,wo)>.001)n=sn;}
   float3 p=o+d*q.CommittedRayT(),c;
   float metal=saturate(m.colorMetal.w),rough=clamp(m.roughEmit.x,.025,1),ior=clamp(m.roughEmit.w,1.001,3),spec=saturate(m.scaleSpec.w);
-  materialSurface(m,primitive,shape,localP,bary,n,c,rough,metal);
+  materialSurface(m,primitive,shape,localP,bary,q.CommittedRayT(),n,c,rough,metal);
   if(dot(n,orientedGN)<=0||dot(n,wo)<=.001)n=orientedGN;
   float trans=saturate(m.roughEmit.z)*(1-metal)*switches.z,opaque=1-trans;
   float prob=(spec>0||metal>0)?(.25+.65*metal)*switches.y:0;
@@ -233,7 +287,7 @@ float3 path(float3 o,float3 d,inout uint seed,out float4 guide,out float4 alb){
 [numthreads(8,8,1)]void main(uint3 id:SV_DispatchThreadID){
  uint w=uint(dims.x),h=uint(dims.y);if(id.x>=w||id.y>=h)return;
  uint idx=id.y*w+id.x,seed=hash(idx+uint(dims.z)*1973u+123u);float3 color=0;float4 g=0,a=0;uint spp=max(1u,uint(options.y));
- for(uint i=0;i<spp;++i){float2 uv=(float2(id.xy)+float2(rnd(seed),rnd(seed)))/float2(w,h)*2-1;float3 dir=normalize(forward.xyz+right.xyz*uv.x*eye.w*display.x/display.y-up.xyz*uv.y*eye.w);float4 gg,aa;color+=path(eye.xyz,dir,seed,gg,aa);if(i==0){g=gg;a=aa;}}
+ for(uint i=0;i<spp;++i){float2 uv=(float2(id.xy)+float2(rnd(seed),rnd(seed)))/float2(w,h)*2-1;float3 dir=normalize(forward.xyz+right.xyz*uv.x*eye.w*display.x/display.y-up.xyz*uv.y*eye.w);float4 gg,aa;float3 sampleColor=path(eye.xyz,dir,seed,gg,aa);if(forward.w>0&&options.w==0)sampleColor*=min(1.,forward.w/max(1e-5,luma(sampleColor)));color+=sampleColor;if(i==0){g=gg;a=aa;}}
  color/=spp;if(any(isnan(color))||any(isinf(color)))color=float3(1,0,1);
  if(dims.w>0)color=lerp(history[idx].xyz,color,1/(dims.w+1));history[idx]=float4(color,1);guides[idx]=g;albedos[idx]=a;
 }
