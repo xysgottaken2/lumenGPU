@@ -12,6 +12,11 @@ import (
  "strconv"
  "slices"
 	"time"
+ "context"
+ "os"
+ "os/signal"
+ "path/filepath"
+ "syscall"
 )
 
 const addr = "127.0.0.1:8765"
@@ -91,6 +96,7 @@ type Bridge struct {
  worldRevision,movingRevision,characterRevision uint64
  meshes map[uint32][]V
  meshVertices int
+ lumenus *Lumenus
 }
 
 func finite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) && math.Abs(x) < 1e7 }
@@ -156,6 +162,7 @@ func (b *Bridge) handler() http.Handler {
  mux.HandleFunc("/api/native-world-ws",func(w http.ResponseWriter,r *http.Request){b.nativeSplitStream(w,r,1)})
  mux.HandleFunc("/api/native-moving-ws",func(w http.ResponseWriter,r *http.Request){b.nativeSplitStream(w,r,2)})
  mux.HandleFunc("/api/mesh",b.meshHandler)
+ if b.lumenus!=nil {mux.HandleFunc("/api/lumenus",b.lumenus.handler)}
  mux.HandleFunc("/api/input", func(w http.ResponseWriter,r *http.Request){
   if r.Method!="POST" || r.Header.Get("Origin")!="" {http.Error(w,"native POST only",403);return}
   var c Control;d:=json.NewDecoder(http.MaxBytesReader(w,r.Body,4096))
@@ -225,7 +232,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("LUMEN GPU 0.8.5 | Native bridge at http://" + addr + " | Ctrl+C to stop")
-	s := http.Server{Handler: (&Bridge{}).handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
-	log.Fatal(s.Serve(l))
+	b:= &Bridge{}
+ exe,err:=os.Executable();if err!=nil{log.Fatal(err)}
+ worker,err:=newLumenus(b,filepath.Join(filepath.Dir(exe),"TempAssets"));if err!=nil{log.Fatal(err)}
+ b.lumenus=worker
+ defer worker.close()
+ fmt.Println("LUMEN GPU 0.9 | Lumenus session cache:",worker.dir)
+ fmt.Println("Native bridge at http://" + addr + " | Ctrl+C to stop")
+ s := http.Server{Handler: b.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
+ ctx,stop:=signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM);defer stop()
+ go func(){<-ctx.Done();timeout,cancel:=context.WithTimeout(context.Background(),2*time.Second);defer cancel();s.Shutdown(timeout);s.Close()}()
+ if err:=s.Serve(l);err!=nil&&err!=http.ErrServerClosed{log.Print(err)}
 }
