@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.8.2)')
+print('[LumenGPU] Client starting (0.8.3)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -37,6 +37,30 @@ end
 local oldFov=70
 local controls=nil
 local oldCameraType=nil
+local virtualInput=nil
+local pointerHeld={}
+local pointerPositions={}
+local lastVirtualWarning=0
+local function forwardPointer(events)
+    if type(events)~='table' then return end
+    if not virtualInput then local ok,v=pcall(function() return UIS:CreateVirtualInput() end);if ok then virtualInput=v end end
+    if not virtualInput then if os.clock()-lastVirtualWarning>5 then lastVirtualWarning=os.clock();warn('[LumenGPU] VirtualInput unavailable in this Studio session') end;return end
+    local cam=workspace.CurrentCamera;if not cam then return end
+    for _,e in events do
+        if type(e)=='table' and type(e.x)=='number' and type(e.y)=='number' then
+            local pos=Vector2.new(math.clamp(e.x,0,1)*cam.ViewportSize.X,math.clamp(e.y,0,1)*cam.ViewportSize.Y)
+            local key=e.button==1 and Enum.UserInputType.MouseButton1 or e.button==2 and Enum.UserInputType.MouseButton2 or nil
+            local ok,err=pcall(function()
+                if key then virtualInput:SendMouseButton(pos,key,e.down==true,0);pointerHeld[key]=e.down==true;pointerPositions[key]=pos else virtualInput:SendMousePosition(pos) end
+            end)
+            if not ok and os.clock()-lastVirtualWarning>5 then lastVirtualWarning=os.clock();warn('[LumenGPU] VirtualInput: '..tostring(err)) end
+        end
+    end
+end
+local function releasePointer()
+    if virtualInput then for key,held in pointerHeld do if held then pcall(function() virtualInput:SendMouseButton(pointerPositions[key] or Vector2.zero,key,false,0) end) end end end
+    table.clear(pointerHeld);table.clear(pointerPositions)
+end
 local gui=Instance.new('ScreenGui'); gui.Name='LumenGPUConnection';gui.ResetOnSpawn=false;gui.DisplayOrder=100;gui.Parent=player:WaitForChild('PlayerGui')
 local button=Instance.new('TextButton');button.Name='Toggle';button.Size=UDim2.fromOffset(240,34);button.Position=UDim2.new(1,-252,0,12);button.BackgroundColor3=Color3.fromRGB(35,45,57);button.TextColor3=Color3.new(1,1,1);button.TextSize=14;button.Font=Enum.Font.GothamMedium;button.Text='LUMEN GPU: Start (P)';button.Parent=gui
 print('[LumenGPU] Connection UI created')
@@ -63,7 +87,7 @@ task.spawn(function()
 end)
 local function release(reason)
     if not external then return end
-    external=false; input={};firstPerson=false;restoreRotation()
+    external=false; input={};firstPerson=false;restoreRotation();releasePointer()
     print('[LumenGPU] External controls released: '..tostring(reason or 'stopped'))
     if controls then pcall(function() controls:Enable() end) end
     local cam=workspace.CurrentCamera; if cam then cam.CameraType=oldCameraType or Enum.CameraType.Custom;cam.FieldOfView=oldFov end
@@ -92,7 +116,7 @@ remote.OnClientEvent:Connect(function(kind,c)
     if (c.distance or 0)>0 then orbitDistance=math.clamp(c.distance,.5,40) end
     if (c.fov or 0)>0 then cam.FieldOfView=math.clamp(c.fov,35,110) end
     yaw-=math.clamp(c.dx or 0,-2000,2000)*sensitivity; pitch=math.clamp(pitch-math.clamp(c.dy or 0,-2000,2000)*sensitivity,-1.553,1.553)
-    input=c;lastInput=os.clock()
+    input=c;lastInput=os.clock();forwardPointer(c.pointer)
     local hum=player.Character and player.Character:FindFirstChildOfClass('Humanoid'); if hum and c.jump then hum.Jump=true end
 end)
 local function vec(v) return {v.X,v.Y,v.Z} end
@@ -390,11 +414,62 @@ end
 RunService:BindToRenderStep('LumenGPU_ExternalMovement',Enum.RenderPriority.Input.Value+1,applyMovement)
 -- Reassert immediately before simulation as well, so physics sees held input.
 RunService.PreSimulation:Connect(applyMovement)
+-- ScreenGui snapshot: normalized viewport layout, not a second 3D render.
+local GuiService=game:GetService('GuiService')
+local function packColor(c,t)
+    local function b(v) return math.clamp(math.floor(v*255+.5),0,255) end
+    return b(c.R)+b(c.G)*256+b(c.B)*65536+b(1-t)*16777216
+end
+local function hudSnapshot(cam)
+    local size=cam.ViewportSize;if size.X<1 or size.Y<1 then return {} end
+    local inset=GuiService:GetGuiInset();local entries={};local pg=player:FindFirstChildOfClass('PlayerGui')
+    if not pg then return entries end
+    local roots={}
+    for _,root in pg:GetChildren() do if root:IsA('ScreenGui') and root.Enabled and root~=gui then roots[#roots+1]=root end end
+    table.sort(roots,function(a,b) return a.DisplayOrder<b.DisplayOrder end)
+    local function visit(obj,clip,offset,depth)
+        if #entries>=256 or depth>32 or not obj:IsA('GuiObject') or not obj.Visible then return end
+        local pos=obj.AbsolutePosition+offset;local sz=obj.AbsoluteSize
+        local x,y,w,h=pos.X/size.X,pos.Y/size.Y,sz.X/size.X,sz.Y/size.Y
+        local text='';local fg=0;local ts=0;local ax,ay=1,1
+        if obj:IsA('TextLabel') or obj:IsA('TextButton') or obj:IsA('TextBox') then
+            text=obj.ContentText or obj.Text; if #text>1024 then text=string.sub(text,1,1024) end
+            fg=packColor(obj.TextColor3,obj.TextTransparency);ts=obj.TextSize/size.Y
+            if obj.TextScaled then ts=math.min(sz.Y*.75,sz.X/math.max(1,#text)*1.6)/size.Y end
+            ax=obj.TextXAlignment==Enum.TextXAlignment.Left and 0 or obj.TextXAlignment==Enum.TextXAlignment.Right and 2 or 1
+            ay=obj.TextYAlignment==Enum.TextYAlignment.Top and 0 or obj.TextYAlignment==Enum.TextYAlignment.Bottom and 2 or 1
+        end
+        local corner=obj:FindFirstChildOfClass('UICorner');local radius=corner and math.min(sz.X,sz.Y)*corner.CornerRadius.Scale+corner.CornerRadius.Offset or 0
+        if w>0 and h>0 then
+            entries[#entries+1]={x=x,y=y,w=w,h=h,cx=clip[1],cy=clip[2],cw=math.max(0,clip[3]-clip[1]),ch=math.max(0,clip[4]-clip[2]),size=math.max(0,ts),border=obj.BorderSizePixel/size.Y,round=math.max(0,radius/size.Y),bg=packColor(obj.BackgroundColor3,obj.BackgroundTransparency),fg=fg,bc=packColor(obj.BorderColor3,0),ax=ax,ay=ay,text=text}
+        end
+        local nextClip=clip
+        if obj.ClipsDescendants or obj:IsA('ScrollingFrame') then nextClip={math.max(x,clip[1]),math.max(y,clip[2]),math.min(x+w,clip[3]),math.min(y+h,clip[4])} end
+        local children={};for _,child in obj:GetChildren() do if child:IsA('GuiObject') then children[#children+1]=child end end
+        table.sort(children,function(a,b) return a.ZIndex<b.ZIndex end)
+        for _,child in children do visit(child,nextClip,offset,depth+1) end
+    end
+    for _,root in roots do
+        local children={};for _,child in root:GetChildren() do if child:IsA('GuiObject') then children[#children+1]=child end end
+        table.sort(children,function(a,b) return a.ZIndex<b.ZIndex end)
+        local offset=root.IgnoreGuiInset and Vector2.zero or inset
+        for _,child in children do visit(child,{0,0,1,1},offset,0) end
+    end
+    return entries
+end
+local hudElapsed=0
+local hudLast=''
+local hudLastSend=-100
 local elapsed=0
 local fastElapsed=0
 RunService:BindToRenderStep('LumenGPU_ExternalCamera',Enum.RenderPriority.Camera.Value+1,function(dt)
     if not active then return end
     updateCamera()
+    hudElapsed+=dt
+    if hudElapsed>=.1 then
+        hudElapsed=0;local cam=workspace.CurrentCamera
+        if cam then local ok,rows=pcall(hudSnapshot,cam);if ok then local encoded=HTTP:JSONEncode(rows);if encoded~=hudLast or os.clock()-hudLastSend>1 then hudLast=encoded;hudLastSend=os.clock();remote:FireServer('hud',rows) end end end
+    end
     elapsed+=dt;fastElapsed+=dt;if elapsed<1/60 then return end;elapsed=elapsed%(1/60)
     local cam=workspace.CurrentCamera;if not cam then return end
     local c=cam.CFrame;local fast=nil
@@ -428,6 +503,7 @@ local owner,latest=nil,nil
 local latestAvatar={} -- other moving objects
 local latestCharacter={}
 local latestEnvironment=nil;local latestSun=nil
+local latestHUD={};local hudSerial=0;local sentHUD=-1
 local cameraSerial=0;local sentCamera=-1;local cameraSentAt=0
 local avatarSerial=0;local sentAvatar=-1
 local latestWorld=nil
@@ -457,7 +533,7 @@ local function connectCamera()
  local ok,c=pcall(function() return HTTP:CreateWebStreamClient(Enum.WebStreamClientType.WebSocket,{Url='ws://127.0.0.1:8765/api/ws'}) end)
  if not ok or not c then return end
  cameraWS=c
- local function opened() if cameraWS==c then cameraOpen=true;outstanding=0;sentCamera=-1;lastCameraAck=os.clock() end end
+ local function opened() if cameraWS==c then cameraOpen=true;outstanding=0;sentCamera=-1;sentHUD=-1;lastCameraAck=os.clock() end end
  c.Opened:Connect(opened)
  c.MessageReceived:Connect(function(msg)
   if cameraWS~=c or not owner then return end
@@ -494,7 +570,7 @@ end
 local function vec(v) return {v.X,v.Y,v.Z} end
 remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
     if cmd=='start' and (not owner or owner==player) then
-        if not owner then owner=player; latest=nil; latestAvatar={};latestCharacter={};cameraSerial=0;sentCamera=-1;avatarSerial=0;sentAvatar=-1; latestWorld=nil;worldSerial=0;pending=nil;lastSnapshot=-100; lastPartsJSON=nil; print('[LumenGPU] Local bridge started') end
+        if not owner then owner=player; latest=nil; latestAvatar={};latestCharacter={};latestHUD={};hudSerial+=1;sentHUD=-1;cameraSerial=0;sentCamera=-1;avatarSerial=0;sentAvatar=-1; latestWorld=nil;worldSerial=0;pending=nil;lastSnapshot=-100; lastPartsJSON=nil; print('[LumenGPU] Local bridge started') end
         remote:FireClient(player,'status','Waiting for HTTP')
     elseif cmd=='stop' and owner==player then owner=nil; latest=nil;pending=nil;closeWS()
     elseif cmd=='meshBegin' and owner==player then
@@ -518,6 +594,7 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
         if type(avatar)~='table' or #avatar>128 or #pending.rows+#avatar>pending.count then pending=nil else for _,part in avatar do pending.rows[#pending.rows+1]=part end end
     elseif cmd=='worldEnd' and owner==player and pending and data==pending.serial then
         if #pending.rows==pending.count then latestWorld=pending.rows;worldSerial=pending.serial;print('[LumenGPU] Accepted client world '..worldSerial..': '..#latestWorld..' static parts') end;pending=nil
+    elseif cmd=='hud' and owner==player and type(data)=='table' and #data<=256 then latestHUD=data;hudSerial+=1
     elseif cmd=='camera' and owner==player and type(data)=='table' then
         if type(data.p)=='table' and #data.p==3 and type(data.r)=='table' and #data.r==3 and type(data.u)=='table' and #data.u==3 and type(data.f)=='table' and #data.f==3 and type(data.fov)=='number' then
             if type(avatar)=='table' and #avatar<=64 then
@@ -544,18 +621,21 @@ task.spawn(function()
      if outstanding>=4 then return end
      if sentCamera==cameraSerial and now-cameraSentAt<.1 then return end
      local serial=cameraSerial
-     local payload=HTTP:JSONEncode({camera=latest,character=latestCharacter,sun=latestSun or vec(Lighting:GetSunDirection()),environment=latestEnvironment})
+     local hud=sentHUD~=hudSerial and latestHUD or nil
+     local payload=HTTP:JSONEncode({camera=latest,character=latestCharacter,sun=latestSun or vec(Lighting:GetSunDirection()),environment=latestEnvironment,hud=hud})
      outstanding+=1
      local sent,e=pcall(function() cameraWS:Send(payload) end)
      if not sent then closeCamera();error(e) end
-     sentCamera=serial;cameraSentAt=now
+     sentCamera=serial;cameraSentAt=now;if hud then sentHUD=hudSerial end
     elseif now-lastHTTP>=.15 then
      -- Compatibility fallback retains geometry when both sockets are unavailable.
      lastHTTP=now
-     local update={camera=latest,character=latestCharacter,sun=latestSun or vec(Lighting:GetSunDirection()),environment=latestEnvironment}
+     local hud=sentHUD~=hudSerial and latestHUD or nil
+     local update={camera=latest,character=latestCharacter,sun=latestSun or vec(Lighting:GetSunDirection()),environment=latestEnvironment,hud=hud}
      -- Geometry fallback is owned by the independent geometry task.
      local res=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/update-controls',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode(update)})
      if not res.Success then error('HTTP '..res.StatusCode) end
+     if hud then sentHUD=hudSerial end
      if owner then local ctrl=HTTP:JSONDecode(res.Body);ctrl.transport='HTTP';remote:FireClient(owner,'input',ctrl) end
     end
    end)
@@ -595,4 +675,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.8.2 mouse-wheel zoom and first-person camera installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.8.3 context-aware cursor and ScreenGui HUD installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')

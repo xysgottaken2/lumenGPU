@@ -48,6 +48,7 @@ type Environment struct {
  FirstPerson bool `json:"firstPerson"`
 }
 type Update struct {
+ HUD *[]HUDItem `json:"hud,omitempty"`
  Environment *Environment `json:"environment,omitempty"`
 	Camera Camera  `json:"camera"`
 	Sun    V       `json:"sun"`
@@ -65,6 +66,7 @@ type State struct {
 	Received int64  `json:"received"`
 }
 type Control struct {
+ Pointer []PointerEvent `json:"pointer,omitempty"`
  Active bool `json:"active"`
  X float64 `json:"x"`
  Z float64 `json:"z"`
@@ -76,6 +78,8 @@ type Control struct {
  Fov float64 `json:"fov"`
 }
 type Bridge struct {
+ hud []HUDItem
+ hudRevision uint64
 	mu sync.RWMutex
 	state State
  control Control
@@ -94,6 +98,7 @@ func norm(v V) float64      { return math.Sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]
 func axis(v V) bool         { return vec(v) && math.Abs(norm(v)-1) < .03 }
 func valid(u Update) bool {
 	if e:=u.Environment;e!=nil&&(!finite(e.Clock)||e.Clock<0||e.Clock>24||!finite(e.SunSize)||e.SunSize<0||e.SunSize>180||!finite(e.Brightness)||e.Brightness<0||e.Brightness>100){return false}
+ if u.HUD!=nil&&!validHUD(*u.HUD){return false}
  c := u.Camera
 	if !vec(c.P) || !axis(c.R) || !axis(c.U) || !axis(c.F) || !finite(c.Fov) || c.Fov < 5 || c.Fov > 120 || !axis(u.Sun) {
 		return false
@@ -122,6 +127,7 @@ func valid(u Update) bool {
 func (b *Bridge) apply(u Update,wantsControls bool) Control {return b.applyMode(u,wantsControls,false)}
 func (b *Bridge) applyMode(u Update,wantsControls,geometryOnly bool) Control {
 		b.mu.Lock()
+ if !geometryOnly&&u.HUD!=nil&&!slices.Equal(b.hud,*u.HUD){b.hud=*u.HUD;b.hudRevision++}
  if !geometryOnly {b.state.Camera=u.Camera;b.state.Sun=u.Sun;if u.Environment!=nil{e:=*u.Environment;b.state.Environment=&e}}
   changed:=false
   if u.Parts!=nil && !slices.Equal(b.worldParts,*u.Parts) {b.worldParts=*u.Parts;b.worldRevision++;changed=true}
@@ -134,12 +140,13 @@ func (b *Bridge) applyMode(u Update,wantsControls,geometryOnly bool) Control {
   }
 if !geometryOnly {b.state.Seq++;b.state.Received=time.Now().UnixMilli()}
   c:=Control{}
-  if wantsControls && time.Since(b.controlAt)<500*time.Millisecond {c=b.control;b.control.DX=0;b.control.DY=0;b.control.Jump=false}
+  if wantsControls && time.Since(b.controlAt)<500*time.Millisecond {c=b.control;b.control.DX=0;b.control.DY=0;b.control.Jump=false;b.control.Pointer=nil}
  b.mu.Unlock();return c
 }
 func (b *Bridge) handler() http.Handler {
 	mux := http.NewServeMux()
  mux.HandleFunc("/api/ws",b.stream)
+ mux.HandleFunc("/api/native-hud-ws",b.hudStream)
  mux.HandleFunc("/api/geometry-ws",b.geometryStream)
  mux.HandleFunc("/api/native-camera-ws",func(w http.ResponseWriter,r *http.Request){b.nativeStream(w,r,false)})
  mux.HandleFunc("/api/native-geometry-ws",func(w http.ResponseWriter,r *http.Request){b.nativeStream(w,r,true)})
@@ -217,7 +224,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("LUMEN GPU 0.8 | Native bridge at http://" + addr + " | Ctrl+C to stop")
+	fmt.Println("LUMEN GPU 0.8.3 | Native bridge at http://" + addr + " | Ctrl+C to stop")
 	s := http.Server{Handler: (&Bridge{}).handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
 	log.Fatal(s.Serve(l))
 }

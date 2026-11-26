@@ -7,3 +7,5 @@ Studio lighting direction, ClockTime, Brightness, and Sky sun size/visibility sy
 V0.8.1: colored direct sun and sky transmission through glass, including tinted visibility debug output. Thin-glass approximation, no focused caustics. NRD still incomplete.
 
 V0.8.2: scroll zoom with F2 capture, first-person at minimum zoom, Roblox camera lock respected. Local avatar stays in the TLAS but is masked from primary camera rays; shadows/reflections/GI still include it. Replace native files and reinstall Lua.
+
+V0.8.3 preview: third-person free cursor, first-person lock, RMB orbit, simple ScreenGui HUD and Studio VirtualInput mouse clicks. See README.txt for unsupported UI features and runtime caveats.

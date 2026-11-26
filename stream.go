@@ -10,11 +10,11 @@ import (
 )
 var localUpgrade=websocket.Upgrader{CheckOrigin:func(r *http.Request)bool{return r.Header.Get("Origin")==""}}
 func validControl(c Control)bool{
- return finite(c.X)&&finite(c.Z)&&finite(c.DX)&&finite(c.DY)&&math.Abs(c.X)<=1&&math.Abs(c.Z)<=1&&math.Abs(c.DX)<=2000&&math.Abs(c.DY)<=2000&&finite(c.Distance)&&finite(c.Sensitivity)&&finite(c.Fov)&&c.Distance>=0&&c.Distance<=40&&c.Sensitivity>=0&&c.Sensitivity<=5&&c.Fov>=0&&c.Fov<=120
+ return validPointer(c.Pointer)&&finite(c.X)&&finite(c.Z)&&finite(c.DX)&&finite(c.DY)&&math.Abs(c.X)<=1&&math.Abs(c.Z)<=1&&math.Abs(c.DX)<=2000&&math.Abs(c.DY)<=2000&&finite(c.Distance)&&finite(c.Sensitivity)&&finite(c.Fov)&&c.Distance>=0&&c.Distance<=40&&c.Sensitivity>=0&&c.Sensitivity<=5&&c.Fov>=0&&c.Fov<=120
 }
 func(b *Bridge)storeControl(c Control){
  b.mu.Lock();defer b.mu.Unlock()
- if c.Active {if b.control.Active&&time.Since(b.controlAt)<500*time.Millisecond{c.DX=math.Max(-2000,math.Min(2000,c.DX+b.control.DX));c.DY=math.Max(-2000,math.Min(2000,c.DY+b.control.DY));c.Jump=c.Jump||b.control.Jump}}else{c=Control{}}
+ if c.Active {if b.control.Active&&time.Since(b.controlAt)<500*time.Millisecond{c.DX=math.Max(-2000,math.Min(2000,c.DX+b.control.DX));c.DY=math.Max(-2000,math.Min(2000,c.DY+b.control.DY));c.Jump=c.Jump||b.control.Jump;c.Pointer=append(b.control.Pointer,c.Pointer...);if len(c.Pointer)>64{c.Pointer=c.Pointer[len(c.Pointer)-64:]}}}else{c=Control{}}
  b.control=c;b.controlAt=time.Now()
 }
 func(b *Bridge)stream(w http.ResponseWriter,r *http.Request){b.studioStream(w,r,false)}
