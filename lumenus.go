@@ -35,6 +35,7 @@ type Lumenus struct {
  entries map[string]assetResult
  ids map[uint32]string
  dir,key,imports string
+ oauth *oauthSession
  ctx context.Context
  cancel context.CancelFunc
  wg sync.WaitGroup
@@ -101,10 +102,10 @@ func(l *Lumenus)fetch(a assetRequest)([]byte,error){
  for _,suffix:=range ext {
   f,e:=os.Open(filepath.Join(l.imports,a.Asset+suffix));if e==nil{data,e:=readLimited(f,assetLimit);f.Close();return data,e};if !os.IsNotExist(e){return nil,fmt.Errorf("local import unreadable")}
  }
- if l.key==""{return nil,fmt.Errorf("no API key or local import")}
+ if l.key==""&&l.oauth==nil{return nil,fmt.Errorf("not connected: run Connect-Roblox.bat or supply a permitted local import")}
  c:=&http.Client{Timeout:12*time.Second,CheckRedirect:func(r *http.Request,via []*http.Request)error{return http.ErrUseLastResponse}}
  req,e:=http.NewRequestWithContext(l.ctx,"GET","https://apis.roblox.com/asset-delivery-api/v1/assetId/"+a.Asset,nil);if e!=nil{return nil,e}
- req.Header.Set("x-api-key",l.key)
+ if l.oauth!=nil{token,e:=l.oauth.bearer(l.ctx);if e!=nil{return nil,e};req.Header.Set("Authorization","Bearer "+token)}else{req.Header.Set("x-api-key",l.key)}
  res,e:=c.Do(req);if e!=nil{return nil,fmt.Errorf("asset delivery request failed")}
  defer res.Body.Close()
  var target string

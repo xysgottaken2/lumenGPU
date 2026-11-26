@@ -28,5 +28,5 @@ if (-not (Test-Path LumenBridge.exe)) {
     CheckExit
 }
 New-Item -ItemType Directory -Force dist | Out-Null
-Copy-Item build\Release\LumenGPU.exe,build\Release\trace.cso,build\Release\resolve.cso,build\Release\wavelet.cso,LumenBridge.exe,Install_LumenGPU_0.2.lua,Launch.bat,README.txt -Destination dist -Force
+Copy-Item build\Release\LumenGPU.exe,build\Release\trace.cso,build\Release\resolve.cso,build\Release\wavelet.cso,LumenBridge.exe,Install_LumenGPU_0.2.lua,Launch.bat,Connect-Roblox.bat,README.txt -Destination dist -Force
 Write-Host 'Native application built in dist. Run Launch.bat after reading README.txt.'
