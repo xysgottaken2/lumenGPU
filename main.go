@@ -45,6 +45,7 @@ type Part struct {
  Specular float64 `json:"specular"`
  EmissionColor V `json:"emissionColor"`
  Tex [8]float64 `json:"tex"`
+ Extra [8]float64 `json:"extra"`
 }
 type Environment struct {
  Clock float64 `json:"clock"`
@@ -97,6 +98,7 @@ type Bridge struct {
  worldRevision,movingRevision,characterRevision uint64
  meshes map[uint32][]V
  meshUV map[uint32][]UV
+ meshN map[uint32][]V
  textures map[uint32][]uint32
  meshVertices int
  lumenus *Lumenus
@@ -122,6 +124,7 @@ func updateError(u Update) string {
    switch{
    case !validShape(p.Shape):reason="invalid shape ID"
    case !validTexture(p.Tex):reason="invalid texture metadata"
+   case !validExtra(p.Extra):reason="invalid material/light metadata"
    case !vec(p.P)||!axis(p.R)||!axis(p.U)||!axis(p.B):reason="invalid transform"
    case !vec(p.S)||!vec(p.C)||!vec(p.EmissionColor):reason="non-finite size or color"
    case !finite(p.Metal)||!finite(p.Rough)||!finite(p.Emit)||!finite(p.Transmission)||!finite(p.IOR)||!finite(p.Specular):reason="non-finite material"
@@ -243,7 +246,7 @@ func main() {
  b.lumenus=worker
  defer worker.close()
  if len(os.Args)>1&&os.Args[1]=="--connect" {ctx,cancel:=signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM);session,e:=configureOAuth(ctx);cancel();if e!=nil{log.Printf("[Lumenus] Authorization failed: %v; continuing with local imports/API key",e)}else{worker.oauth=session;log.Println("[Lumenus] Roblox authorization successful (session only)")}}else if worker.key==""{log.Println("[Lumenus] Local-only mode. Run Connect-Roblox.bat for Roblox account authorization.")}
- fmt.Println("LUMEN GPU 0.9.2b | Lumenus session cache:",worker.dir)
+ fmt.Println("LUMEN GPU 0.9.3 | Lumenus session cache:",worker.dir)
  fmt.Println("Native bridge at http://" + addr + " | Ctrl+C to stop")
  s := http.Server{Handler: b.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
  ctx,stop:=signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM);defer stop()

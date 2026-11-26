@@ -12,7 +12,7 @@ func runDraco(ctx context.Context,helper string,chunk []byte)([]byte,error){
  if len(chunk)<9||uint64(binary.LittleEndian.Uint32(chunk))!=uint64(len(chunk)-4)||!bytes.HasPrefix(chunk[4:],[]byte("DRACO")){return nil,fmt.Errorf("invalid Draco COREMESH length or magic")}
  if helper==""{return nil,fmt.Errorf("LumenDraco executable path unavailable")}
  ctx,cancel:=context.WithTimeout(ctx,20*time.Second);defer cancel()
- cmd:=exec.CommandContext(ctx,helper)
+ cmd:=exec.CommandContext(ctx,helper);hideDracoWindow(cmd)
  cmd.Stdin=bytes.NewReader(chunk[4:])
  out:=&limitedDracoOutput{limit:8+200000*40+200000*12};errout:=&limitedDracoOutput{limit:4096}
  cmd.Stdout=out;cmd.Stderr=errout

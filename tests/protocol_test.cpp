@@ -4,6 +4,8 @@
 #include <fstream>
 #include <iterator>
 int main(int argc,char** argv){
+ {std::vector<unsigned char> b(88+176);memcpy(b.data(),"LGP4",4);uint32_t n=1;memcpy(b.data()+20,&n,4);float k=4095;memcpy(b.data()+232,&k,4);assert(parse(b).parts[0].extra[0]==4095);}
+ {std::vector<unsigned char> b(8+3*32);memcpy(b.data(),"LGM3",4);uint32_t n=3;memcpy(b.data()+4,&n,4);float normal=1;memcpy(b.data()+8+60+8,&normal,4);assert(parseMeshData(b).normals[0].z==1);}
  for(bool corner:{false,true}){auto v=primitives::wedge(corner);assert(v.size()==(corner?18:24));V inside{corner?.2f:0.f,-.25f,.2f};for(size_t i=0;i<v.size();i+=3){auto n=triangleNormal(v[i],v[i+1],v[i+2]);assert(primitives::dot(n,primitives::sub(inside,v[i]))<0);}}
  for(unsigned style=0;style<3;++style){auto v=primitives::truss(4,style);assert(!v.empty()&&v.size()%3==0);for(auto a:v){assert(std::isfinite(a.x)&&std::isfinite(a.y)&&std::isfinite(a.z));assert(std::fabs(a.x)<.51f&&std::fabs(a.y)<.53f&&std::fabs(a.z)<.51f);}}
  assert(primitives::truss(4,0).size()>primitives::truss(4,1).size());assert(primitives::truss(4,1).size()>primitives::truss(4,2).size());assert(primitives::bays(512)==256);

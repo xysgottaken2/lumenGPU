@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.9.2b)')
+print('[LumenGPU] Client starting (0.9.3)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -169,6 +169,15 @@ local function discoverImage(uri)
     return id and resolvedImages[id] or 0
 end
 local faceCode={[Enum.NormalId.Right]=1,[Enum.NormalId.Left]=2,[Enum.NormalId.Top]=3,[Enum.NormalId.Bottom]=4,[Enum.NormalId.Back]=5,[Enum.NormalId.Front]=6}
+local bodyNames={Head='Head',Torso='Torso',LeftArm='Left Arm',RightArm='Right Arm',LeftLeg='Left Leg',RightLeg='Right Leg'}
+local function characterMesh(obj)
+    local char=obj.Parent
+    if not char or not char:FindFirstChildOfClass('Humanoid') then return nil end
+    for _,item in char:GetChildren() do
+        if item:IsA('CharacterMesh') and bodyNames[item.BodyPart.Name]==obj.Name then return item end
+    end
+    return nil
+end
 local function discoverImages(obj)
     local slot=0
     if obj:IsA('MeshPart') then slot=discoverImage(obj.TextureID) end
@@ -176,8 +185,10 @@ local function discoverImages(obj)
     if special and special.MeshType==Enum.MeshType.FileMesh then slot=discoverImage(special.TextureId) end
     local surface=obj:FindFirstChildOfClass('SurfaceAppearance')
     if surface then local color=discoverImage(surface.ColorMap);if color>0 then slot=color end end
+    local cm=characterMesh(obj)
+    if cm then local base=discoverImage('rbxassetid://'..tostring(cm.BaseTextureId));local overlay=discoverImage('rbxassetid://'..tostring(cm.OverlayTextureId));if overlay>0 then slot=overlay elseif base>0 then slot=base end end
     if slot>0 then return {slot,0,1,1,0,0,1,0} end
-    if obj:IsA('Part') and obj.Shape==Enum.PartType.Block then
+    if (obj:IsA('Part') and obj.Shape==Enum.PartType.Block) or obj:IsA('SpawnLocation') then
         for _,child in obj:GetChildren() do
             if child:IsA('Decal') or child:IsA('Texture') then
                 slot=discoverImage(child.Texture)
@@ -210,7 +221,10 @@ task.spawn(function()
 end)
 local function meshEntry(obj)
     local content,key,special
-    if obj:IsA('MeshPart') then
+    local cm=characterMesh(obj)
+    if cm and cm.MeshId>0 then
+        key='rbxassetid://'..tostring(cm.MeshId);content=Content.fromUri(key)
+    elseif obj:IsA('MeshPart') then
         content=obj.MeshContent
         key=obj.MeshId~='' and obj.MeshId or obj
     else
@@ -242,10 +256,13 @@ local function extractMesh(entry)
             if #ids==3 then
                 local uvOK,faceUVs=pcall(function() return editable:GetFaceUVs(face) end)
                 if not uvOK then faceUVs={} end
+                local nOK,faceNormals=pcall(function() return editable:GetFaceNormals(face) end);if not nOK then faceNormals={} end
                 for j,id in ids do
                     local v=editable:GetPosition(id)/scale
                     local uv=faceUVs[j] and editable:GetUV(faceUVs[j]) or Vector2.zero
-                    rows[#rows+1]={v.X,v.Y,v.Z,uv.X,uv.Y}
+                    local normal=faceNormals[j] and editable:GetNormal(faceNormals[j])*scale or Vector3.zero
+                    if normal.Magnitude>0 then normal=normal.Unit end
+                    rows[#rows+1]={v.X,v.Y,v.Z,uv.X,uv.Y,normal.X,normal.Y,normal.Z}
                 end
             end
             if i%128==0 then task.wait() end
@@ -334,6 +351,22 @@ local function orientWedge(obj,c,size,shape)
     if math.abs(rotation)==math.pi/2 then size=Vector3.new(size.Z,size.Y,size.X) end
     return c*CFrame.Angles(0,rotation,0),size
 end
+local surfaceNames={'RightSurface','LeftSurface','TopSurface','BottomSurface','BackSurface','FrontSurface'}
+local surfaceKinds={[Enum.SurfaceType.Studs]=1,[Enum.SurfaceType.Inlet]=2,[Enum.SurfaceType.Universal]=3}
+local function extraMaterial(obj,tex)
+    local packed=0
+    if obj:IsA('Part') or obj:IsA('SpawnLocation') then
+        for i,k in surfaceNames do packed+=(surfaceKinds[obj[k]] or 0)*4^(i-1) end
+    end
+    local n,r,m=0,0,0
+    local surface=obj:FindFirstChildOfClass('SurfaceAppearance')
+    if surface then n=discoverImage(surface.NormalMap);r=discoverImage(surface.RoughnessMap);m=discoverImage(surface.MetalnessMap) end
+    local gen=obj:GetAttribute('LumenPBRStrength')
+    if type(gen)~='number' or gen~=gen then gen=.35 end
+    local spawn=obj:IsA('SpawnLocation') and not tex and 1 or 0
+    return {packed,n,r,m,tex and math.clamp(gen,0,1) or 0,spawn,0,0}
+end
+local extraScanned=setmetatable({},{__mode='k'})
 local function materialPart(obj)
     local function num(k,v,lo,hi)
         local x=obj:GetAttribute(k);if type(x)~='number' or x~=x then return v end;return math.clamp(x,lo,hi)
@@ -357,6 +390,8 @@ local function materialPart(obj)
     end
     if shape==-1 or shape==-2 then c,size=orientWedge(obj,c,size,shape) end
     local tex=imageScanned[obj];if tex==nil then tex=discoverImages(obj) or false;imageScanned[obj]=tex end
+    local cached=extraScanned[obj];local ex
+    if cached and cached.rev==meshReadyVersion and cached.tex==tex then ex=cached.ex else ex=extraMaterial(obj,tex);extraScanned[obj]={rev=meshReadyVersion,tex=tex,ex=ex} end
     local e,special=meshEntry(obj)
     if e and e.state=='ready' then
         shape=e.id
@@ -367,7 +402,7 @@ local function materialPart(obj)
         end
         size=Vector3.new(math.max(size.X,.0001),math.max(size.Y,.0001),math.max(size.Z,.0001))
     end
-    return {p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(size),c={color.R,color.G,color.B},metal=num('PathMetallic',metal,0,1),rough=num('PathRoughness',rough,.025,1),emit=num('PathEmission',(obj:GetAttribute('PathEmissive')==true or mat==Enum.Material.Neon) and 4 or 0,0,50),transmission=num('PathTransmission',mat==Enum.Material.Glass and 1 or obj.Transparency,0,1),ior=num('PathIOR',1.5,1.001,3),shape=shape,specular=num('PathSpecular',1,0,1),emissionColor={ec.R,ec.G,ec.B},tex=tex or nil}
+    return {p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(size),c={color.R,color.G,color.B},metal=num('PathMetallic',metal,0,1),rough=num('PathRoughness',rough,.025,1),emit=num('PathEmission',(obj:GetAttribute('PathEmissive')==true or mat==Enum.Material.Neon) and 4 or 0,0,50),transmission=num('PathTransmission',mat==Enum.Material.Glass and 1 or obj.Transparency,0,1),ior=num('PathIOR',1.5,1.001,3),shape=shape,specular=num('PathSpecular',1,0,1),emissionColor={ec.R,ec.G,ec.B},tex=tex or nil,extra=ex}
 end
 local lastClothingScan=-100
 local function avatarSnapshot()
@@ -535,6 +570,43 @@ task.spawn(function()
 end)
 
 -- Static snapshots are built outside the camera Heartbeat and paced over frames.
+-- Capture the nearest 64 enabled Roblox lights as non-geometric records.
+local lightObjects=setmetatable({},{__mode='k'})
+local function trackLight(o)
+    if o:IsA('PointLight') or o:IsA('SpotLight') or o:IsA('SurfaceLight') then lightObjects[o]=true end
+end
+for _,o in workspace:GetDescendants() do trackLight(o) end
+workspace.DescendantAdded:Connect(trackLight)
+workspace.DescendantRemoving:Connect(function(o) lightObjects[o]=nil end)
+local faceVector={ [Enum.NormalId.Right]=Vector3.xAxis,[Enum.NormalId.Left]=-Vector3.xAxis,[Enum.NormalId.Top]=Vector3.yAxis,[Enum.NormalId.Bottom]=-Vector3.yAxis,[Enum.NormalId.Back]=Vector3.zAxis,[Enum.NormalId.Front]=-Vector3.zAxis }
+local function lightRows()
+    local cam=workspace.CurrentCamera;if not cam then return {} end
+    local candidates={}
+    for o in lightObjects do
+        if o.Parent and o.Enabled and o.Range>0 and o.Brightness>0 then
+            local parent=o.Parent;local cf=parent:IsA('Attachment') and parent.WorldCFrame or parent:IsA('BasePart') and parent.CFrame or nil
+            if cf then
+                local kind=o:IsA('PointLight') and 1 or o:IsA('SpotLight') and 2 or 3
+                local localDir=kind==1 and Vector3.zAxis or (faceVector[o.Face] or -Vector3.zAxis)
+                local dir=cf:VectorToWorldSpace(localDir);local pos=cf.Position
+                if kind~=1 and parent:IsA('BasePart') then pos+=cf:VectorToWorldSpace(localDir*parent.Size*.5)+dir*.015 end
+                local cone=kind==1 and -1 or math.cos(math.rad(o.Angle*.5))
+                local col=o.Color
+                candidates[#candidates+1]={d=(pos-cam.CFrame.Position).Magnitude,row={p=vec(pos),r={1,0,0},u={0,1,0},b={0,0,1},s={math.clamp(o.Range,.01,100000),1,1},c={col.R,col.G,col.B},emit=math.clamp(o.Brightness,0,50),emissionColor={col.R,col.G,col.B},shape=0,extra={0,0,0,0,0,0,kind,cone},tex={0,0,0,0,0,0,0,0},metal=0,rough=1,specular=0,transmission=0,ior=1.5,lightDir=dir}}
+            end
+        end
+    end
+    table.sort(candidates,function(a,b) return a.d<b.d end)
+    local rows={}
+    for i=1,math.min(#candidates,64) do
+        local row=candidates[i].row
+        local dir=row.lightDir;row.lightDir=nil
+        local cf=CFrame.lookAt(Vector3.zero,dir,math.abs(dir.Y)>.99 and Vector3.xAxis or Vector3.yAxis)
+        row.r=vec(cf.RightVector);row.u=vec(cf.UpVector);row.b=vec(cf.LookVector)
+        rows[#rows+1]=row
+    end
+    return rows
+end
 local function refreshWorld()
     local generation=captureGeneration
     capturedMeshVersion=meshReadyVersion
@@ -570,6 +642,7 @@ local function refreshWorld()
     for _,obj in order do if tracked[obj] and not seen[obj] then seen[obj]=true;compact[#compact+1]=obj;dirty=true end end
     order=compact
     for _,row in terrainRows do if row.entry.state=='ready' and #static<15360 then static[#static+1]=row.part end end
+    for _,row in lightRows() do if #static<15360 then static[#static+1]=row end end
     local encoded=HTTP:JSONEncode(static)
     if encoded~=lastWorldJSON then
         serial+=1;local id=serial
@@ -868,12 +941,12 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
             -- One asset at a time; pace requests under HTTP limits.
             local waitFor=math.max(0,2-(os.clock()-lastMeshUpload));if waitFor>0 then task.wait(waitFor) end
             lastMeshUpload=os.clock()
-            local vertices,uvs={},{}
+            local vertices,uvs,normals={},{},{}
             for _,row in batch.rows do
-                if type(row)~='table' or #row~=5 then remote:FireClient(player,'meshAck',batch.id,false);return end
-                vertices[#vertices+1]={row[1],row[2],row[3]};uvs[#uvs+1]={row[4],row[5]}
+                if type(row)~='table' or (#row~=5 and #row~=8) then remote:FireClient(player,'meshAck',batch.id,false);return end
+                vertices[#vertices+1]={row[1],row[2],row[3]};uvs[#uvs+1]={row[4],row[5]};normals[#normals+1]={row[6] or 0,row[7] or 0,row[8] or 0}
             end
-            local ok,res=pcall(function() return HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/mesh',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode({id=batch.id,vertices=vertices,uvs=uvs})}) end)
+            local ok,res=pcall(function() return HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/mesh',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode({id=batch.id,vertices=vertices,uvs=uvs,normals=normals})}) end)
             if owner==player then remote:FireClient(player,'meshAck',batch.id,ok and res.Success) end
             if not ok or not res.Success then warn('[LumenGPU] Mesh HTTP upload failed: '..tostring(ok and res.StatusCode or res)) end
         end)
@@ -965,4 +1038,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.9.2b Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.9.3 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')

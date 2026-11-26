@@ -40,6 +40,7 @@ static std::vector<char> decode(const char* data,size_t length){
  if(!mesh||mesh->num_points()<3||mesh->num_points()>200000||mesh->num_faces()<1||mesh->num_faces()>200000)throw std::runtime_error("Draco geometry count exceeds limits");
  const auto* pos=attr(*mesh,0,draco::GeometryAttribute::POSITION,3);
  const auto* uv=attr(*mesh,2,draco::GeometryAttribute::TEX_COORD,2);
+ const auto* normals=mesh->GetNamedAttribute(draco::GeometryAttribute::NORMAL);if(!normals)normals=mesh->GetAttributeByUniqueId(1);if(normals&&normals->num_components()!=3)normals=nullptr;
  if(!pos)throw std::runtime_error("Draco position attribute missing");
  if(!uv)throw std::runtime_error("Draco UV attribute missing");
  // COREMESH v1 payload: vertex records (40 bytes) and indexed triangles.
@@ -50,7 +51,7 @@ static std::vector<char> decode(const char* data,size_t length){
   if(!pos->ConvertValue<float,3>(pos->mapped_index(p),xyz)||!uv->ConvertValue<float,2>(uv->mapped_index(p),tex))throw std::runtime_error("Draco attribute conversion failed");
   for(float x:xyz){if(!std::isfinite(x)||std::fabs(x)>=1e7f)throw std::runtime_error("Draco invalid position");flt(out,x);}
   // Renderer computes triangle normals; preserve positions and UV seams using point mapping.
-  flt(out,0);flt(out,1);flt(out,0);
+  float normal[3]{};if(normals&&!normals->ConvertValue<float,3>(normals->mapped_index(p),normal))normal[0]=normal[1]=normal[2]=0;for(float x:normal)flt(out,std::isfinite(x)?x:0.f);
   for(float x:tex){if(!std::isfinite(x)||std::fabs(x)>4096)throw std::runtime_error("Draco invalid UV");flt(out,x);}
   u32(out,0);u32(out,0xffffffffu);
  }

@@ -1,5 +1,5 @@
 RaytracingAccelerationStructure scene : register(t0);
-struct Material {float4 colorMetal,roughEmit,ax,ay,az,scaleSpec,emitColor,tex0,tex1;};
+struct Material {float4 colorMetal,roughEmit,ax,ay,az,scaleSpec,emitColor,tex0,tex1,extra0,extra1;};
 StructuredBuffer<Material> mats : register(t1);
 StructuredBuffer<float3> meshNormals : register(t2);
 RWStructuredBuffer<float4> history : register(u0);
@@ -26,23 +26,77 @@ float4 assetSample(uint base,float2 uv,bool wrap){
  uint2 p1=wrap?uint2(b&255):uint2(clamp(b,0,255));
  return lerp(lerp(assetTexel(base,p0),assetTexel(base,uint2(p1.x,p0.y)),f.x),lerp(assetTexel(base,uint2(p0.x,p1.y)),assetTexel(base,p1),f.x),f.y);
 }
-float3 surfaceColor(Material m,uint primitive,float3 localP,float2 bary){
- float3 c=linearColor(m.colorMetal.xyz);if(m.tex0.x<=0)return c;
- uint mode=uint(m.tex0.y);float2 uv=0;
- if(mode==0){uint at=uint(m.az.w)+primitive*3;if(m.az.w<=0)return c;uv=meshNormals[at].xy*(1-bary.x-bary.y)+meshNormals[at+1].xy*bary.x+meshNormals[at+2].xy*bary.y;}
- else {
-  if(primitive/2+1!=mode)return c;
-  if(mode==1)uv=float2(-localP.z,-localP.y)+.5;
-  else if(mode==2)uv=float2(localP.z,-localP.y)+.5;
-  else if(mode==3)uv=float2(localP.x,localP.z)+.5;
-  else if(mode==4)uv=float2(localP.x,-localP.z)+.5;
-  else if(mode==5)uv=float2(localP.x,-localP.y)+.5;
-  else uv=float2(-localP.x,-localP.y)+.5;
+uint visualFlags(){return uint(max(0.,-1-environment.w));}
+float2 faceUV(uint face,float3 p){
+ if(face==1)return float2(-p.z,-p.y)+.5;
+ if(face==2)return float2(p.z,-p.y)+.5;
+ if(face==3)return float2(p.x,p.z)+.5;
+ if(face==4)return float2(p.x,-p.z)+.5;
+ if(face==5)return float2(p.x,-p.y)+.5;
+ return float2(-p.x,-p.y)+.5;
+}
+bool materialUV(Material m,uint primitive,float3 p,float2 bary,out float2 uv){
+ uv=0;uint mode=uint(m.tex0.y);
+ if(mode==0){
+  if(m.az.w<=0)return false;uint at=uint(m.az.w)+primitive*3;uv=meshNormals[at].xy*(1-bary.x-bary.y)+meshNormals[at+1].xy*bary.x+meshNormals[at+2].xy*bary.y;
+ }else{if(primitive/2+1!=mode)return false;uv=faceUV(mode,p);}
+ uv=uv*m.tex0.zw+m.tex1.xy;return true;
+}
+float3 tangentWorld(Material m,float3 v){v*=m.scaleSpec.xyz;return m.ax.xyz*v.x+m.ay.xyz*v.y+m.az.xyz*v.z;}
+float3 bumpNormal(float3 n,float3 t,float3 b,float2 grad){
+ t-=n*dot(n,t);if(dot(t,t)<1e-8)return n;t=normalize(t);
+ b-=n*dot(n,b)+t*dot(t,b);if(dot(b,b)<1e-8)b=cross(n,t);else b=normalize(b);
+ return normalize(n+t*grad.x+b*grad.y);
+}
+float luma(float3 c){return dot(c,float3(.2126,.7152,.0722));}
+void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,inout float3 n,out float3 c,inout float rough,inout float metal){
+ c=linearColor(m.colorMetal.xyz);float2 uv;
+ bool hasUV=materialUV(m,primitive,lp,bary);
+ float3 t=m.ax.xyz,b=m.az.xyz;
+ if(shape==3){uint at=uint(m.ay.w)+primitive*6;t=tangentWorld(m,meshNormals[at+4]);b=tangentWorld(m,meshNormals[at+5]);}
+ else if(shape==0){
+  uint face=primitive/2+1;
+  if(face<=2){t=m.az.xyz*(face==1?-1:1);b=-m.ay.xyz;}
+  else if(face<=4){t=m.ax.xyz;b=m.az.xyz*(face==3?1:-1);}
+  else{t=m.ax.xyz*(face==5?1:-1);b=-m.ay.xyz;}
+  if((visualFlags()&256u)!=0){
+   uint kind=(uint(m.extra0.x)>>((face-1)*2))&3u;
+   if(kind>0){
+    float2 scale=face<=2?m.scaleSpec.zy:face<=4?m.scaleSpec.xz:m.scaleSpec.xy;
+    float2 delta=frac(faceUV(face,lp)*scale)-.5;float rad=length(delta);
+    float ring=smoothstep(.23,.29,rad)*(1-smoothstep(.34,.40,rad));
+    float signBump=kind==2?1:-1;
+    if(kind==3)signBump=delta.x*delta.y>0?-1:1;
+    n=bumpNormal(n,t,b,delta/max(rad,.001)*ring*signBump*.65);
+    c*=1-.12*ring;
+   }
+  }
+  if(m.extra1.y>0&&face==3){
+   float2 d=faceUV(face,lp)-.5;float r=length(d);float a=atan2(d.y,d.x);
+   float rays=1-smoothstep(.03,.12,abs(sin(a*4))*r);
+   float mark=max(1-smoothstep(.17,.20,r),rays*smoothstep(.19,.22,r)*(1-smoothstep(.37,.40,r)));
+   c=lerp(c,float3(.055,.055,.055),mark*.85);
+  }
  }
- uv=uv*m.tex0.zw+m.tex1.xy;
- float4 tex=assetSample(uint(m.tex0.x),uv,m.tex1.w>0);
- float3 texColor=linearColor(tex.rgb);
- return lerp(c,mode==0?c*texColor:texColor,saturate(tex.a*m.tex1.z));
+ if(!hasUV)return;
+ bool wrap=m.tex1.w>0;
+ if(m.tex0.x>0){
+  float4 tex=assetSample(uint(m.tex0.x),uv,wrap);float3 tc=linearColor(tex.rgb);
+  c=lerp(c,m.tex0.y==0?c*tc:tc,saturate(tex.a*m.tex1.z));
+ }
+ if(m.extra0.z>0)rough=clamp(assetSample(uint(m.extra0.z),uv,wrap).r,.025,1);
+ if(m.extra0.w>0)metal=saturate(assetSample(uint(m.extra0.w),uv,wrap).r);
+ if(m.extra0.y>0){
+  float3 nn=assetSample(uint(m.extra0.y),uv,wrap).xyz*2-1;
+  n=bumpNormal(n,t,b,nn.xy/max(.2,nn.z));
+ }else if((visualFlags()&128u)!=0&&m.extra1.x>0&&m.tex0.x>0){
+  uint off=uint(m.tex0.x);float stepUV=1./256.;
+  float h=luma(assetSample(off,uv,wrap).rgb);
+  float hx=luma(assetSample(off,uv+float2(stepUV,0),wrap).rgb)-h;
+  float hy=luma(assetSample(off,uv+float2(0,stepUV),wrap).rgb)-h;
+  n=bumpNormal(n,t,b,-float2(hx,hy)*m.extra1.x*3);
+  if(m.extra0.z<=0)rough=clamp(lerp(rough,.3+.6*(1-h),m.extra1.x),.025,1);
+ }
 }
 float daylight(){return smoothstep(-.16,.12,sun.y);}
 float sunPower(){return smoothstep(-.035,.08,sun.y)*quality.z*environment.z;}
@@ -66,13 +120,14 @@ float3 visibleSun(float3 d){
  return linearColor(c.xyz)*c.w*sunTint()*20*sunPower();
 }
 RayDesc ray(float3 o,float3 d,float limit){RayDesc r;r.Origin=o;r.Direction=d;r.TMin=.001;r.TMax=limit;return r;}
-bool blocked(float3 o,float3 d){RayQuery<RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;q.TraceRayInline(scene,RAY_FLAG_NONE,255,ray(o,d,quality.x));while(q.Proceed()){}return q.CommittedStatus()==COMMITTED_TRIANGLE_HIT;}
+bool blocked(float3 o,float3 d,float limit){RayQuery<RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;q.TraceRayInline(scene,RAY_FLAG_NONE,255,ray(o,d,limit));while(q.Proceed()){}return q.CommittedStatus()==COMMITTED_TRIANGLE_HIT;}
 // Straight-line colored shadow transmission. Each boundary contributes
 // sqrt(tint * transmission), so a closed pane applies its tint once.
 // This is thin-glass visibility, not refracted caustic transport.
-float3 lightVisibility(float3 o,float3 d){
- if(switches.z<=0)return blocked(o,d)?float3(0,0,0):float3(1,1,1);
- float3 visibility=1;float remaining=quality.x;
+float3 lightVisibilityTo(float3 o,float3 d,float limit){
+ if(limit<=.001)return 1;
+ if(switches.z<=0)return blocked(o,d,limit)?float3(0,0,0):float3(1,1,1);
+ float3 visibility=1;float remaining=limit;
  [loop]for(uint layer=0;layer<16;++layer){
   if(remaining<=.001)return visibility;
   RayQuery<RAY_FLAG_FORCE_OPAQUE> q;
@@ -92,6 +147,7 @@ float3 lightVisibility(float3 o,float3 d){
  // Conservatively reject rays whose layer budget was exhausted.
  return 0;
 }
+float3 lightVisibility(float3 o,float3 d){return lightVisibilityTo(o,d,quality.x);}
 float smith(float n,float a2){return 2*n/max(1e-6,n+sqrt(a2+(1-a2)*n*n));}
 float3 fresnel(float v,float3 f0){return f0+(1-f0)*pow(1-saturate(v),5);}
 float powerWeight(float a,float b){return a*a/max(1e-12,a*a+b*b);}
@@ -106,6 +162,17 @@ float3 evalBSDF(float3 n,float3 wo,float3 wi,float3 base,float metal,float rough
  pdf=(1-q)*nl/PI+q*D*nh/(4*vh);
  return diffuse+glossy;
 }
+float3 sampleLocalLight(float3 p,float3 gn,float3 n,float3 wo,float3 c,float metal,float rough,float ior,float spec,float prob,inout uint seed){
+ uint flags=visualFlags(),count=flags&127u;if(count==0)return 0;
+ uint at=(flags>>9)+min(count-1,uint(rnd(seed)*count));Material l=mats[at];
+ float3 delta=l.ax.xyz-p;float dist=length(delta);if(dist<.006||dist>=l.roughEmit.x)return 0;
+ float3 wi=delta/dist;float nl=dot(n,wi);if(nl<=0||dot(gn,wi)<=0)return 0;
+ float cone=1;if(l.extra1.z>1){float cosA=dot(-wi,l.ay.xyz);cone=smoothstep(l.extra1.w,min(1.,l.extra1.w+.08),cosA);if(l.extra1.z==3)cone*=saturate(cosA);}
+ if(cone<=0)return 0;
+ float attenuation=pow(saturate(1-dist/l.roughEmit.x),2)*l.roughEmit.y*12/(1+dist*dist);
+ float pdf;float3 f=evalBSDF(n,wo,wi,c,metal,rough,ior,spec,prob,pdf);
+ return f*nl*linearColor(l.colorMetal.xyz)*attenuation*cone*count*lightVisibilityTo(p+gn*.003,wi,max(.001,dist-.007));
+}
 float3 sunDirection(inout uint seed){float r=sqrt(rnd(seed))*sun.w,phi=2*PI*rnd(seed);return basis(normalize(sun.xyz),r*cos(phi),r*sin(phi),1);}
 float3 path(float3 o,float3 d,inout uint seed,out float4 guide,out float4 alb){
  float3 beta=1,L=0;guide=0;alb=0;float prevPdf=0;bool prevDelta=true;bool prevSkyNEE=false;
@@ -116,28 +183,33 @@ float3 path(float3 o,float3 d,inout uint seed,out float4 guide,out float4 alb){
   Material m=mats[q.CommittedInstanceID()];uint primitive=q.CommittedPrimitiveIndex();uint shape=uint(m.ax.w);
   float3 localP=q.CommittedObjectRayOrigin()+q.CommittedObjectRayDirection()*q.CommittedRayT();
   float3 ln;
-  if(shape==3)ln=meshNormals[uint(m.ay.w)+primitive];
+  if(shape==3)ln=meshNormals[uint(m.ay.w)+primitive*6];
   else if(shape==1)ln=normalize(localP);
   else if(shape==2){uint face=primitive%4;if(face==2)ln=float3(-1,0,0);else if(face==3)ln=float3(1,0,0);else ln=normalize(float3(0,localP.y,localP.z));}
   else {uint face=primitive/2;ln=face<2?float3(1,0,0):face<4?float3(0,1,0):float3(0,0,1);if(face%2==1)ln=-ln;}
   float3 invN=ln/max(m.scaleSpec.xyz,.0001);float3 gn=normalize(m.ax.xyz*invN.x+m.ay.xyz*invN.y+m.az.xyz*invN.z);
   bool entering=dot(gn,d)<0;float3 n=entering?gn:-gn,wo=-d;
-  float3 p=o+d*q.CommittedRayT(),c=surfaceColor(m,primitive,localP,q.CommittedTriangleBarycentrics());
+  float3 orientedGN=n;float2 bary=q.CommittedTriangleBarycentrics();
+  if(shape==3){uint at=uint(m.ay.w)+primitive*6;float3 sn=meshNormals[at+1]*(1-bary.x-bary.y)+meshNormals[at+2]*bary.x+meshNormals[at+3]*bary.y;sn/=max(m.scaleSpec.xyz,.0001);sn=normalize(m.ax.xyz*sn.x+m.ay.xyz*sn.y+m.az.xyz*sn.z);if(!entering)sn=-sn;if(dot(sn,orientedGN)>0&&dot(sn,wo)>.001)n=sn;}
+  float3 p=o+d*q.CommittedRayT(),c;
   float metal=saturate(m.colorMetal.w),rough=clamp(m.roughEmit.x,.025,1),ior=clamp(m.roughEmit.w,1.001,3),spec=saturate(m.scaleSpec.w);
+  materialSurface(m,primitive,shape,localP,bary,n,c,rough,metal);
+  if(dot(n,orientedGN)<=0||dot(n,wo)<=.001)n=orientedGN;
   float trans=saturate(m.roughEmit.z)*(1-metal)*switches.z,opaque=1-trans;
   float prob=(spec>0||metal>0)?(.25+.65*metal)*switches.y:0;
   if(i==0){guide=float4(n,q.CommittedRayT());alb=float4(c,float(q.CommittedInstanceID()+1));}
   if(options.w==1)return c;if(options.w==2)return n*.5+.5;
-  if(options.w==4){float v=saturate(dot(n,sun.xyz));return v>0&&sun.y>0?lightVisibility(p+n*.003,sun.xyz)*v:float3(0,0,0);}
-  if(options.w==5)return lightVisibility(p+n*.003,float3(0,1,0));
+  if(options.w==4){float v=saturate(dot(n,sun.xyz));return v>0&&sun.y>0?lightVisibility(p+orientedGN*.003,sun.xyz)*v:float3(0,0,0);}
+  if(options.w==5)return lightVisibility(p+orientedGN*.003,float3(0,1,0));
   if(i==0)L+=c*(1-metal)*opaque*quality.w*lerp(.035,1,daylight());
   if(entering)L+=beta*linearColor(m.emitColor.xyz)*m.roughEmit.y;
   if(opaque>0&&entering){
+   L+=beta*opaque*sampleLocalLight(p,orientedGN,n,wo,c,metal,rough,ior,spec,prob,seed);
    float3 wi=sunDirection(seed);float nl=dot(n,wi),pdf;
    float3 f=evalBSDF(n,wo,wi,c,metal,rough,ior,spec,prob,pdf);
-   if(nl>0&&sunPower()>0)L+=beta*f*opaque*nl*sunTint()*5*sunPower()*lightVisibility(p+n*.003,wi);
+   if(nl>0&&dot(orientedGN,wi)>0&&sunPower()>0)L+=beta*f*opaque*nl*sunTint()*5*sunPower()*lightVisibility(p+orientedGN*.003,wi);
    if(switches.x>0){float z=rnd(seed),phi=2*PI*rnd(seed),r=sqrt(1-z*z);wi=basis(n,r*cos(phi),r*sin(phi),z);f=evalBSDF(n,wo,wi,c,metal,rough,ior,spec,prob,pdf);
-    float lp=1/(2*PI);L+=beta*f*opaque*sky(wi)*(z/lp)*(i==uint(options.x)?1:powerWeight(lp,pdf*opaque))*lightVisibility(p+n*.003,wi);}
+    float lp=1/(2*PI);if(dot(orientedGN,wi)>0)L+=beta*f*opaque*sky(wi)*(z/lp)*(i==uint(options.x)?1:powerWeight(lp,pdf*opaque))*lightVisibility(p+orientedGN*.003,wi);}
   }
   if(i==uint(options.x))break;
   if(trans>0&&(!entering||rnd(seed)<trans)){
@@ -146,15 +218,15 @@ float3 path(float3 o,float3 d,inout uint seed,out float4 guide,out float4 alb){
    if(!reflectIt){float ei=entering?1:ior,et=entering?ior:1;float rs=(ei*ci-et*ct)/max(1e-6,ei*ci+et*ct),rp=(et*ci-ei*ct)/max(1e-6,et*ci+ei*ct);reflectIt=switches.y>0&&rnd(seed)<.5*(rs*rs+rp*rp);}
    d=reflectIt?reflect(d,n):normalize(refract(d,n,eta));
    if(!reflectIt)beta*=(entering?c:float3(1,1,1))*eta*eta;
-   o=p+(reflectIt?n:-n)*.003;prevDelta=true;prevSkyNEE=false;continue;
+   o=p+(reflectIt?orientedGN:-orientedGN)*.003;prevDelta=true;prevSkyNEE=false;continue;
   }
   float3 wi;
   if(rnd(seed)<prob){float a=rough*rough,u=rnd(seed),phi=2*PI*rnd(seed),ct=sqrt((1-u)/max(1e-6,1+(a*a-1)*u));float st=sqrt(max(0,1-ct*ct));float3 h=basis(n,st*cos(phi),st*sin(phi),ct);if(dot(wo,h)<=0)break;wi=reflect(d,h);}
   else {if(switches.x==0)break;wi=cosine(n,seed);}
-  float pdf;float3 f=evalBSDF(n,wo,wi,c,metal,rough,ior,spec,prob,pdf);float nl=dot(n,wi);if(pdf<=0||nl<=0)break;
+  float pdf;float3 f=evalBSDF(n,wo,wi,c,metal,rough,ior,spec,prob,pdf);float nl=dot(n,wi);if(pdf<=0||nl<=0||dot(orientedGN,wi)<=0)break;
   beta*=f*(nl/pdf);prevPdf=pdf*opaque;prevDelta=false;prevSkyNEE=entering&&switches.x>0&&opaque>0;
   if(i>=3){float rr=clamp(max(beta.x,max(beta.y,beta.z)),.05,.95);if(rnd(seed)>=rr)break;beta/=rr;}
-  o=p+n*.003;d=wi;
+  o=p+orientedGN*.003;d=wi;
  }
  return min(L,40);
 }

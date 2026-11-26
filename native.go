@@ -4,9 +4,9 @@ import ("encoding/binary";"math")
 
 // LGR4: 88-byte header, 112-byte part records, little endian.
 func nativePacket(s State) []byte {
- textured:=false;for _,p:=range s.Parts{if p.Tex[0]>0{textured=true;break}}
- stride:=112;if textured{stride=144}
- b:=make([]byte,88+len(s.Parts)*stride);copy(b,"LGR4");if textured{copy(b,"LGT4")}
+ textured,extended:=false,false;for _,p:=range s.Parts{if p.Tex[0]>0{textured=true};if p.Extra!=[8]float64{}{extended=true}}
+ stride:=112;if textured||extended{stride=144};if extended{stride=176}
+ b:=make([]byte,88+len(s.Parts)*stride);copy(b,"LGR4");if textured{copy(b,"LGT4")};if extended{copy(b,"LGP4")}
  binary.LittleEndian.PutUint64(b[4:],s.Scene)
  binary.LittleEndian.PutUint64(b[12:],s.Seq)
  binary.LittleEndian.PutUint32(b[20:],uint32(len(s.Parts)))
@@ -14,7 +14,7 @@ func nativePacket(s State) []byte {
  put:=func(v float64){binary.LittleEndian.PutUint32(b[at:],math.Float32bits(float32(v)));at+=4}
  vec:=func(v V){for _,x:=range v {put(x)}}
  vec(s.Camera.P);vec(s.Camera.R);vec(s.Camera.U);vec(s.Camera.F);put(s.Camera.Fov);vec(s.Sun)
- for _,p:=range s.Parts {vec(p.P);vec(p.R);vec(p.U);vec(p.B);vec(p.S);vec(p.C);put(p.Metal);put(p.Rough);put(p.Emit);put(p.Transmission);put(p.IOR);put(p.Shape);put(p.Specular);vec(p.EmissionColor);if textured{for _,v:=range p.Tex{put(v)}}}
+ for _,p:=range s.Parts {vec(p.P);vec(p.R);vec(p.U);vec(p.B);vec(p.S);vec(p.C);put(p.Metal);put(p.Rough);put(p.Emit);put(p.Transmission);put(p.IOR);put(p.Shape);put(p.Specular);vec(p.EmissionColor);if textured||extended{for _,v:=range p.Tex{put(v)}};if extended{for _,v:=range p.Extra{put(v)}}}
  return b
 }
 
