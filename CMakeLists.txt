@@ -29,7 +29,16 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/wavelet.cso"
  COMMAND "${DXC_EXECUTABLE}" -T cs_6_5 -E wavelet -O3 -Fo "${CMAKE_CURRENT_BINARY_DIR}/wavelet.cso" "${CMAKE_CURRENT_SOURCE_DIR}/native/trace.hlsl"
  DEPENDS native/trace.hlsl VERBATIM)
 add_custom_target(LumenShader ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/trace.cso" "${CMAKE_CURRENT_BINARY_DIR}/resolve.cso" "${CMAKE_CURRENT_BINARY_DIR}/wavelet.cso")
-add_dependencies(LumenGPU LumenShader)
+foreach(shader_entry estimateMotion interpolateFrame)
+ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${shader_entry}.cso"
+  COMMAND "${DXC_EXECUTABLE}" -T cs_6_5 -E "${shader_entry}" -O3 -Fo "${CMAKE_CURRENT_BINARY_DIR}/${shader_entry}.cso" "${CMAKE_CURRENT_SOURCE_DIR}/native/framegen.hlsl"
+  DEPENDS native/framegen.hlsl VERBATIM)
+endforeach()
+add_custom_target(LumenFrameGen ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/estimateMotion.cso" "${CMAKE_CURRENT_BINARY_DIR}/interpolateFrame.cso")
+add_dependencies(LumenGPU LumenShader LumenFrameGen)
+add_custom_command(TARGET LumenGPU POST_BUILD
+ COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_BINARY_DIR}/estimateMotion.cso" "$<TARGET_FILE_DIR:LumenGPU>/estimateMotion.cso"
+ COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_BINARY_DIR}/interpolateFrame.cso" "$<TARGET_FILE_DIR:LumenGPU>/interpolateFrame.cso")
 add_custom_command(TARGET LumenGPU POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_BINARY_DIR}/trace.cso" "$<TARGET_FILE_DIR:LumenGPU>/trace.cso" COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_BINARY_DIR}/resolve.cso" "$<TARGET_FILE_DIR:LumenGPU>/resolve.cso" COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_BINARY_DIR}/wavelet.cso" "$<TARGET_FILE_DIR:LumenGPU>/wavelet.cso")
 
 add_executable(LumenProtocolTest tests/protocol_test.cpp)

@@ -327,6 +327,13 @@ float3 resolveSample(uint idx){if(environment.w>=0){int pass=int(environment.w);
  if(display.z>0&&environment.w<0){float4 g=guides[idx],a=albedos[idx];float3 sum=0;float ws=0;int r=int(display.w);
  for(int y=-r;y<=r;++y)for(int x=-r;x<=r;++x){int2 xy=clamp(center+int2(x,y),int2(0,0),int2(w-1,h-1));uint j=xy.y*w+xy.x;float k=exp(-float(x*x+y*y)/max(.5,2*display.z*display.z*r))*weightGuide(g,a,guides[j],albedos[j]);sum+=history[j].xyz*k;ws+=k;}
  c=sum/max(ws,1e-6);
- }else if(w!=ow||h!=oh){int2 a=clamp(int2(floor(pos)),int2(0,0),int2(w-1,h-1)),b=clamp(int2(floor(pos))+1,int2(0,0),int2(w-1,h-1));float2 f=frac(pos);c=lerp(lerp(resolveSample(a.y*w+a.x),resolveSample(a.y*w+b.x),f.x),lerp(resolveSample(b.y*w+a.x),resolveSample(b.y*w+b.x),f.x),f.y);}
+ }else if((w!=ow||h!=oh)&&right.w<1.5){
+  int2 a=clamp(int2(floor(pos)),int2(0,0),int2(w-1,h-1)),b=clamp(int2(floor(pos))+1,int2(0,0),int2(w-1,h-1));float2 f=frac(pos);
+  uint ids[4]={uint(a.y)*w+uint(a.x),uint(a.y)*w+uint(b.x),uint(b.y)*w+uint(a.x),uint(b.y)*w+uint(b.x)};
+  float weights[4]={(1-f.x)*(1-f.y),f.x*(1-f.y),(1-f.x)*f.y,f.x*f.y};
+  float3 sum=0,lo=c,hi=c;float total=0;
+  [unroll]for(int i=0;i<4;++i){float3 v=resolveSample(ids[i]);float wt=weights[i];if(right.w>.5)wt*=max(.001,weightGuide(guides[idx],albedos[idx],guides[ids[i]],albedos[ids[i]]));sum+=v*wt;total+=wt;lo=min(lo,v);hi=max(hi,v);}
+  float3 filtered=sum/max(total,1e-5);c=right.w>.5?clamp(filtered+(c-filtered)*up.w,lo,hi):filtered;
+ }
  c*=exp2(options.z);if(switches.w==0)c=saturate(c*(2.51*c+.03)/(c*(2.43*c+.59)+.14));else if(switches.w==1)c=c/(1+c);else c=saturate(c);output[id.xy]=float4(pow(saturate(c),1/2.2),1);
 }
