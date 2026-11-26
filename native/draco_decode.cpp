@@ -42,13 +42,13 @@ static std::vector<char> decode(const char* data,size_t length){
  const auto* uv=attr(*mesh,2,draco::GeometryAttribute::TEX_COORD,2);
  const auto* normals=mesh->GetNamedAttribute(draco::GeometryAttribute::NORMAL);if(!normals)normals=mesh->GetAttributeByUniqueId(1);if(normals&&normals->num_components()!=3)normals=nullptr;
  if(!pos)throw std::runtime_error("Draco position attribute missing");
- if(!uv)throw std::runtime_error("Draco UV attribute missing");
+ // Untextured geometry may omit UVs. Positions are still usable.
  // COREMESH v1 payload: vertex records (40 bytes) and indexed triangles.
  std::vector<char> out;out.reserve(8+size_t(mesh->num_points())*40+size_t(mesh->num_faces())*12);
  u32(out,mesh->num_points());
  for(uint32_t i=0;i<mesh->num_points();++i){
   const draco::PointIndex p(i);float xyz[3]{},tex[2]{};
-  if(!pos->ConvertValue<float,3>(pos->mapped_index(p),xyz)||!uv->ConvertValue<float,2>(uv->mapped_index(p),tex))throw std::runtime_error("Draco attribute conversion failed");
+  if(!pos->ConvertValue<float,3>(pos->mapped_index(p),xyz)||(uv&&!uv->ConvertValue<float,2>(uv->mapped_index(p),tex)))throw std::runtime_error("Draco attribute conversion failed");
   for(float x:xyz){if(!std::isfinite(x)||std::fabs(x)>=1e7f)throw std::runtime_error("Draco invalid position");flt(out,x);}
   // Renderer computes triangle normals; preserve positions and UV seams using point mapping.
   float normal[3]{};if(normals&&!normals->ConvertValue<float,3>(normals->mapped_index(p),normal))normal[0]=normal[1]=normal[2]=0;for(float x:normal)flt(out,std::isfinite(x)?x:0.f);

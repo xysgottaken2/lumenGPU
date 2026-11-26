@@ -20,16 +20,16 @@ float3 cosine(float3 n,inout uint s){float phi=2*PI*rnd(s),r=sqrt(rnd(s));return
 float3 linearColor(float3 c){c=saturate(c);return lerp(c/12.92,pow((c+.055)/1.055,2.4),step(.04045,c));}
 float4 assetTexel(uint base,uint2 p,uint side){uint v=sunPixels[base+p.y*side+p.x];return float4(v&255u,(v>>8)&255u,(v>>16)&255u,(v>>24)&255u)/255.;}
 float4 assetSampleLod(uint base,float2 uv,bool wrap,float lod){
- uint level=uint(clamp(round(lod),0.,8.));uint side=256u>>level;
- // Sum previous square levels (256^2 + 128^2 + ...).
- base+=(65536u-side*side)*4u/3u;
+ uint baseSide=sunPixels[base];uint level=uint(clamp(round(lod+log2(float(baseSide)/256.)),0.,log2(float(baseSide))));uint side=baseSide>>level;
+ // Header stores the actual power-of-two resolution, then the complete mip chain.
+ base+=1+(baseSide*baseSide-side*side)*4u/3u;
  float2 coord=wrap?frac(uv)*side-.5:saturate(uv)*(side-1u);
  int2 a=int2(floor(coord)),b=a+1;float2 f=frac(coord);int mask=int(side-1u);
  uint2 p0=wrap?uint2(a&mask):uint2(clamp(a,0,mask));
  uint2 p1=wrap?uint2(b&mask):uint2(clamp(b,0,mask));
  return lerp(lerp(assetTexel(base,p0,side),assetTexel(base,uint2(p1.x,p0.y),side),f.x),lerp(assetTexel(base,uint2(p0.x,p1.y),side),assetTexel(base,p1,side),f.x),f.y);
 }
-float4 assetSample(uint base,float2 uv,bool wrap){return assetSampleLod(base,uv,wrap,0);}
+float4 assetSample(uint base,float2 uv,bool wrap){return assetSampleLod(base,uv,wrap,-10.);}
 uint visualFlags(){return uint(max(0.,-1-environment.w));}
 float2 faceUV(uint face,float3 p){
  if(face==1)return float2(-p.z,-p.y)+.5;
@@ -43,7 +43,11 @@ bool materialUV(Material m,uint primitive,float3 p,float2 bary,out float2 uv){
  uv=0;uint mode=uint(m.tex0.y);
  if(mode==0){
   if(m.az.w<=0)return false;uint at=uint(m.az.w)+primitive*3;uv=meshNormals[at].xy*(1-bary.x-bary.y)+meshNormals[at+1].xy*bary.x+meshNormals[at+2].xy*bary.y;
- }else{if(primitive/2+1!=mode)return false;uv=faceUV(mode,p);}
+ }else{
+  uint face=primitive/2+1;
+  if(m.ax.w==3){float3 n=meshNormals[uint(m.ay.w)+primitive*6];float3 a=abs(n);face=a.x>=a.y&&a.x>=a.z?(n.x>=0?1u:2u):a.y>=a.z?(n.y>=0?3u:4u):(n.z>=0?5u:6u);}
+  if(face!=mode)return false;uv=faceUV(mode,p);
+ }
  uv=uv*m.tex0.zw+m.tex1.xy;return true;
 }
 float3 tangentWorld(Material m,float3 v){v*=m.scaleSpec.xyz;return m.ax.xyz*v.x+m.ay.xyz*v.y+m.az.xyz*v.z;}
@@ -63,7 +67,7 @@ float4 clothingRect(uint region,uint face){
  if(face==1)return float4(506,355,64,128);if(face==2)return float4(374,355,64,128);if(face==3)return float4(308,289,64,64);if(face==4)return float4(308,485,64,64);if(face==5)return float4(440,355,64,128);return float4(308,355,64,128);
 }
 float3 clothingBlend(float3 c,float slot,float2 uv,float lod){
- if(slot<=0)return c;float4 v=assetSampleLod(uint(slot),uv,false,lod);return lerp(c,linearColor(v.rgb),v.a);
+ if(slot<=0)return c;float4 v=assetSampleLod(uint(slot),uv,false,lod-2.);return lerp(c,linearColor(v.rgb),v.a);
 }
 float3 applyClothes(Material m,uint primitive,uint shape,float3 lp,float2 bary,float3 c,float lod){
  if(m.cloth0.w>0&&m.az.w>0){
@@ -132,7 +136,7 @@ void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,
   float3 nn=assetSampleLod(uint(m.extra0.y),uv,wrap,lod).xyz*2-1;
   n=bumpNormal(n,t,b,nn.xy/max(.2,nn.z));
  }else if((visualFlags()&128u)!=0&&m.extra1.x>0&&m.tex0.x>0){
-  uint off=uint(m.tex0.x);float stepUV=exp2(round(lod))/256.;
+  uint off=uint(m.tex0.x);float stepUV=max(1./float(sunPixels[off]),exp2(round(lod))/256.);
   float h=luma(assetSampleLod(off,uv,wrap,lod).rgb);
   float hx=luma(assetSampleLod(off,uv+float2(stepUV,0),wrap,lod).rgb)-h;
   float hy=luma(assetSampleLod(off,uv+float2(0,stepUV),wrap,lod).rgb)-h;

@@ -16,3 +16,13 @@ func TestTextureProtocol(t *testing.T){
  d:=fixtureMesh();off:=len("version 2.00\n")+12+24;binary.LittleEndian.PutUint32(d[off:],math.Float32bits(.25));binary.LittleEndian.PutUint32(d[off+4:],math.Float32bits(.75))
  z:=decodeLumenUV(d,3);if len(z)!=3||z[0]!=(UV{.25,.75}){t.Fatal("external UV decode")}
 }
+
+func TestAdaptiveTextureResolution(t *testing.T){
+ if textureResolution(585,559,0,0)!=1024{t.Fatal("classic atlas downsampled")}
+ if textureResolution(400,400,0,0)!=512{t.Fatal("medium image")}
+ if textureResolution(1024,1024,texturePixelBudget-128*256*256,0)!=256{t.Fatal("budget reserve")}
+ im:=image.NewNRGBA(image.Rect(0,0,585,559));im.SetNRGBA(584,558,color.NRGBA{255,128,7,255});var buf bytes.Buffer;if e:=png.Encode(&buf,im);e!=nil{t.Fatal(e)}
+ pixels,e:=decodeTextureBudget(buf.Bytes(),0,0);if e!=nil||len(pixels)!=1024*1024||pixels[len(pixels)-1]!=0xff0780ff{t.Fatalf("HD decode %v",e)}
+ b:=&Bridge{textures:map[uint32][]uint32{1:pixels}};w:=httptest.NewRecorder();b.textureHandler(w,httptest.NewRequest("GET","http://"+addr+"/api/texture?id=1",nil))
+ if w.Code!=200||w.Body.Len()!=8+1024*1024*4||binary.LittleEndian.Uint32(w.Body.Bytes()[4:])!=1024{t.Fatal("HD texture wire")}
+}

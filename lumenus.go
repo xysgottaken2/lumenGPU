@@ -142,11 +142,12 @@ func(l *Lumenus)process(a assetRequest)assetResult{
  if e!=nil{return assetResult{Status:"failed",Detail:e.Error()}}
  // No aggregate disk cap; per-file and GPU limits remain.
  if a.Kind=="image" {
-  pixels,e:=decodeTexture(data);if e!=nil{return assetResult{Status:"failed",Detail:"unsupported image format or dimensions"}}
+  b:=l.bridge;b.mu.RLock();used:=0;for id,p:=range b.textures{if id!=a.ID{used+=len(p)}};slots:=len(b.textures);if _,ok:=b.textures[a.ID];ok{slots--};b.mu.RUnlock()
+  pixels,e:=decodeTextureBudget(data,used,slots);if e!=nil{return assetResult{Status:"failed",Detail:"unsupported image format or dimensions"}}
   if !cached {if e=os.WriteFile(cachePath,data,0600);e!=nil{return assetResult{Status:"failed",Detail:"cache write failed"}}}
   if a.ID==0{return assetResult{Status:"cached"}}
-  b:=l.bridge;b.mu.Lock();if b.textures==nil{b.textures=map[uint32][]uint32{}};b.textures[a.ID]=pixels;b.mu.Unlock()
-  return assetResult{Status:"ready",Detail:"texture pixels ready for renderer"}
+  b.mu.Lock();if b.textures==nil{b.textures=map[uint32][]uint32{}};b.textures[a.ID]=pixels;b.mu.Unlock()
+  return assetResult{Status:"ready",Detail:fmt.Sprintf("texture pixels ready for renderer (%dx%d)",pixelSide(len(pixels)),pixelSide(len(pixels)))}
  }
  decoded:=data
  if bytes.HasPrefix(data,[]byte("version 7.00\n"))||bytes.HasPrefix(data,[]byte("version 6.00\n")){

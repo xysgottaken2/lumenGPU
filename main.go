@@ -110,7 +110,7 @@ func vec(v V) bool          { return finite(v[0]) && finite(v[1]) && finite(v[2]
 func norm(v V) float64      { return math.Sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]) }
 func axis(v V) bool         { return vec(v) && math.Abs(norm(v)-1) < .03 }
 func valid(u Update) bool { return updateError(u)=="" }
-func validShape(x float64) bool {return !math.IsNaN(x)&&!math.IsInf(x,0)&&x>=-5&&x<=16777215&&x==math.Trunc(x)}
+func validShape(x float64) bool {return !math.IsNaN(x)&&!math.IsInf(x,0)&&x>=-6&&x<=16777215&&x==math.Trunc(x)}
 func updateError(u Update) string {
  if e:=u.Environment;e!=nil&&(!finite(e.Clock)||e.Clock<0||e.Clock>24||!finite(e.SunSize)||e.SunSize<0||e.SunSize>180||!finite(e.Brightness)||e.Brightness<0||e.Brightness>100){return "invalid environment"}
  if u.HUD!=nil&&!validHUD(*u.HUD){return "invalid HUD"}
@@ -248,7 +248,7 @@ func main() {
  b.lumenus=worker
  defer worker.close()
  if len(os.Args)>1&&os.Args[1]=="--connect" {ctx,cancel:=signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM);session,e:=configureOAuth(ctx);cancel();if e!=nil{log.Printf("[Lumenus] Authorization failed: %v; continuing with local imports/API key",e)}else{worker.oauth=session;log.Println("[Lumenus] Roblox authorization successful (session only)")}}else if worker.key==""{log.Println("[Lumenus] Local-only mode. Run Connect-Roblox.bat for Roblox account authorization.")}
- fmt.Println("LUMEN GPU 0.9.4a | Lumenus session cache:",worker.dir)
+ fmt.Println("LUMEN GPU 0.9.4b | Lumenus session cache:",worker.dir)
  fmt.Println("Native bridge at http://" + addr + " | Ctrl+C to stop")
  s := http.Server{Handler: b.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
  ctx,stop:=signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM);defer stop()

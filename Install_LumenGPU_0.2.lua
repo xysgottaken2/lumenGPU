@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.9.4a)')
+print('[LumenGPU] Client starting (0.9.4b)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -170,6 +170,10 @@ local function discoverImage(uri)
 end
 local faceCode={[Enum.NormalId.Right]=1,[Enum.NormalId.Left]=2,[Enum.NormalId.Top]=3,[Enum.NormalId.Bottom]=4,[Enum.NormalId.Back]=5,[Enum.NormalId.Front]=6}
 local bodyNames={Head='Head',Torso='Torso',LeftArm='Left Arm',RightArm='Right Arm',LeftLeg='Left Leg',RightLeg='Right Leg'}
+local donorMeshes={}
+local donorHead=nil
+local donorChar=nil
+local donorRequested=nil
 local function characterMesh(obj)
     if obj.Name~='Head' and obj.Name~='Torso' and obj.Name~='Left Arm' and obj.Name~='Right Arm' and obj.Name~='Left Leg' and obj.Name~='Right Leg' then return nil end
     local char=obj.Parent
@@ -177,6 +181,7 @@ local function characterMesh(obj)
     for _,item in char:GetChildren() do
         if item:IsA('CharacterMesh') and bodyNames[item.BodyPart.Name]==obj.Name then return item end
     end
+    if char==donorChar then return donorMeshes[obj.Name] end
     return nil
 end
 local function discoverImages(obj)
@@ -189,7 +194,7 @@ local function discoverImages(obj)
     local cm=characterMesh(obj)
     if cm then local base=discoverImage('rbxassetid://'..tostring(cm.BaseTextureId));local overlay=discoverImage('rbxassetid://'..tostring(cm.OverlayTextureId));if base>0 then slot=base elseif overlay>0 then slot=overlay end end
     if slot>0 then return {slot,0,1,1,0,0,1,0} end
-    if (obj:IsA('Part') and obj.Shape==Enum.PartType.Block) or obj:IsA('SpawnLocation') then
+    if (obj:IsA('Part') and obj.Shape==Enum.PartType.Block) or obj:IsA('SpawnLocation') or obj.Name=='Head' then
         for _,child in obj:GetChildren() do
             if child:IsA('Decal') or child:IsA('Texture') then
                 slot=discoverImage(child.Texture)
@@ -226,12 +231,15 @@ local function meshEntry(obj)
     if cm and tonumber(cm.MeshId) and tonumber(cm.MeshId)>0 then
         key='rbxassetid://'..tostring(cm.MeshId)
     elseif obj:IsA('MeshPart') then
-        key=obj.MeshId~='' and obj.MeshId or obj
+        local okId,id=pcall(function() return obj.MeshId end)
+        key=okId and id~='' and id or obj
         local ok,value=pcall(function() return obj.MeshContent end);if ok then content=value end
+        if type(key)~='string' and obj.Name=='Head' and obj.Parent==donorChar and donorHead then key=donorHead;content=nil end
     else
         special=obj:FindFirstChildOfClass('SpecialMesh')
-        if not special or special.MeshType~=Enum.MeshType.FileMesh or special.MeshId=='' then return nil end
-        key=special.MeshId
+        if special and special.MeshType==Enum.MeshType.FileMesh and special.MeshId~='' then key=special.MeshId
+        elseif obj.Name=='Head' and obj.Parent==donorChar and donorHead then key=donorHead;special=nil
+        else return nil end
     end
     if not content and type(key)=='string' then local ok,value=pcall(function() return Content.fromUri(key) end);if ok then content=value end end
     if not key then return nil end
@@ -417,6 +425,8 @@ local function materialPart(obj)
         if obj.Shape==Enum.PartType.Ball then shape=1 elseif obj.Shape==Enum.PartType.Cylinder then shape=2 elseif obj.Shape==Enum.PartType.Wedge then shape=-1 elseif obj.Shape==Enum.PartType.CornerWedge then shape=-2 end
     end
     if shape==-1 or shape==-2 then c,size=orientWedge(obj,c,size,shape) end
+    local isHead=obj.Name=='Head' and obj.Parent and obj.Parent:FindFirstChildOfClass('Humanoid')~=nil
+    if isHead then shape=-6 end
     local tex=imageScanned[obj];if tex==nil then tex=discoverImages(obj) or false;imageScanned[obj]=tex end
     local cached=extraScanned[obj];local ex
     if cached and cached.rev==meshReadyVersion and cached.tex==tex and os.clock()-cached.at<3 then ex=cached.ex else ex=extraMaterial(obj,tex);extraScanned[obj]={rev=meshReadyVersion,tex=tex,ex=ex,at=os.clock()} end
@@ -434,16 +444,48 @@ local function materialPart(obj)
         end
         size=Vector3.new(math.max(size.X,.0001),math.max(size.Y,.0001),math.max(size.Z,.0001))
     end
+    if isHead and shape==-6 then
+        local headMesh=obj:FindFirstChildOfClass('SpecialMesh')
+        if headMesh and headMesh.MeshType==Enum.MeshType.Head then c=c*CFrame.new(headMesh.Offset);size=Vector3.new(size.X*.65,size.Y,size.Z*1.1)*headMesh.Scale end
+    end
     return {p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(size),c={color.R,color.G,color.B},metal=num('PathMetallic',metal,0,1),rough=num('PathRoughness',rough,.025,1),emit=num('PathEmission',(obj:GetAttribute('PathEmissive')==true or mat==Enum.Material.Neon) and 4 or 0,0,50),transmission=num('PathTransmission',mat==Enum.Material.Glass and 1 or obj.Transparency,0,1),ior=num('PathIOR',1.5,1.001,3),shape=shape,specular=num('PathSpecular',1,0,1),emissionColor={ec.R,ec.G,ec.B},tex=tex or nil,extra=ex,cloth=garmentData(obj)}
 end
 local cachedCharacter={}
+local function clearDonor()
+    for _,cm in donorMeshes do cm:Destroy() end;donorMeshes={};donorHead=nil;donorChar=nil;donorRequested=nil
+end
+local function requestDonor(char)
+    if donorRequested==char then return end;donorRequested=char
+    task.spawn(function()
+        local hum=char:FindFirstChildOfClass('Humanoid');if not hum then donorRequested=nil;return end
+        local ok,model=pcall(function()
+            local desc=hum:GetAppliedDescription()
+            local good,result=pcall(function() return game:GetService('Players'):CreateHumanoidModelFromDescriptionAsync(desc,hum.RigType) end)
+            desc:Destroy();if not good then error(result) end;return result
+        end)
+        if not ok then warn('[LumenGPU] Avatar description lookup: '..tostring(model));return end
+        if player.Character~=char then model:Destroy();return end
+        for _,cm in donorMeshes do cm:Destroy() end;donorMeshes={};donorHead=nil;donorChar=char
+        local count=0
+        for _,item in model:GetChildren() do
+            if item:IsA('CharacterMesh') then local name=bodyNames[item.BodyPart.Name];if name then donorMeshes[name]=item:Clone();count+=1 end end
+        end
+        local head=model:FindFirstChild('Head');if head then
+            local good,id=pcall(function() if head:IsA('MeshPart') then return head.MeshId end;local m=head:FindFirstChildOfClass('SpecialMesh');if m and m.MeshType==Enum.MeshType.FileMesh then return m.MeshId end end)
+            if good and type(id)=='string' and id~='' then donorHead=id end
+        end
+        model:Destroy();imageScanned=setmetatable({},{__mode='k'});meshReadyVersion+=1
+        print('[LumenGPU] Applied avatar description: '..hum.RigType.Name..', '..count..' R6 package meshes, head asset '..tostring(donorHead~=nil))
+    end)
+end
 local lastAvatarWarning=setmetatable({},{__mode='k'})
 local function avatarFallback(obj)
     local c,s,col=obj.CFrame,obj.Size,obj.Color
-    return {p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(s),c={col.R,col.G,col.B},metal=0,rough=.65,emit=0,transmission=0,ior=1.5,shape=0,specular=1,emissionColor={0,0,0}}
+    return {p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(s),c={col.R,col.G,col.B},metal=0,rough=.65,emit=0,transmission=0,ior=1.5,shape=obj.Name=='Head' and -6 or 0,specular=1,emissionColor={0,0,0}}
 end
 local function avatarSnapshot()
     local list={};local char=player.Character;if not char then return list end
+    requestDonor(char)
     for _,obj in char:GetDescendants() do
         if obj:IsA('BasePart') and obj.Name~='HumanoidRootPart' and obj.Transparency<.95 and obj:GetAttribute('PathIgnore')~=true and #list<64 then
             local ok,row=pcall(materialPart,obj)
@@ -472,8 +514,8 @@ task.spawn(function()
         else cachedCharacter={} end
     end
 end)
-player.CharacterAdded:Connect(function() cachedCharacter={} end)
-player.CharacterRemoving:Connect(function() cachedCharacter={} end)
+player.CharacterAdded:Connect(function() cachedCharacter={};clearDonor() end)
+player.CharacterRemoving:Connect(function() cachedCharacter={};clearDonor() end)
 -- Capture the actual local viewport's world, including client-only parts.
 local HTTP=game:GetService('HttpService')
 local order,tracked,dynamic={},{},{}
@@ -1087,4 +1129,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.9.4a Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.9.4b Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
