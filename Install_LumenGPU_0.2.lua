@@ -157,7 +157,7 @@ local imageScanned=setmetatable({},{__mode='k'})
 local function numericAsset(uri)
     if type(uri)~='string' then return nil end
     local id=uri:match('^rbxassetid://(%d+)$')
-    if not id then id=uri:match('^https?://www%.roblox%.com/asset/%?id=(%d+)$') end
+    if not id then id=uri:match('^https?://www%.roblox%.com/asset/%?id=(%d+)$') or uri:match('^https?://www%.roblox%.com/asset%?id=(%d+)$') end
     if id and #id<=20 and not id:match('^0') then return id end
     return nil
 end
@@ -391,7 +391,7 @@ local function materialPart(obj)
     if shape==-1 or shape==-2 then c,size=orientWedge(obj,c,size,shape) end
     local tex=imageScanned[obj];if tex==nil then tex=discoverImages(obj) or false;imageScanned[obj]=tex end
     local cached=extraScanned[obj];local ex
-    if cached and cached.rev==meshReadyVersion and cached.tex==tex then ex=cached.ex else ex=extraMaterial(obj,tex);extraScanned[obj]={rev=meshReadyVersion,tex=tex,ex=ex} end
+    if cached and cached.rev==meshReadyVersion and cached.tex==tex and os.clock()-cached.at<3 then ex=cached.ex else ex=extraMaterial(obj,tex);extraScanned[obj]={rev=meshReadyVersion,tex=tex,ex=ex,at=os.clock()} end
     local e,special=meshEntry(obj)
     if e and e.state=='ready' then
         shape=e.id

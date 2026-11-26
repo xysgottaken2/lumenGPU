@@ -65,7 +65,7 @@ void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,
     float2 scale=face<=2?m.scaleSpec.zy:face<=4?m.scaleSpec.xz:m.scaleSpec.xy;
     float2 delta=frac(faceUV(face,lp)*scale)-.5;float rad=length(delta);
     float ring=smoothstep(.23,.29,rad)*(1-smoothstep(.34,.40,rad));
-    float signBump=kind==2?1:-1;
+    float signBump=kind==2?-1:1;
     if(kind==3)signBump=delta.x*delta.y>0?-1:1;
     n=bumpNormal(n,t,b,delta/max(rad,.001)*ring*signBump*.65);
     c*=1-.12*ring;
@@ -167,7 +167,7 @@ float3 sampleLocalLight(float3 p,float3 gn,float3 n,float3 wo,float3 c,float met
  uint at=(flags>>9)+min(count-1,uint(rnd(seed)*count));Material l=mats[at];
  float3 delta=l.ax.xyz-p;float dist=length(delta);if(dist<.006||dist>=l.roughEmit.x)return 0;
  float3 wi=delta/dist;float nl=dot(n,wi);if(nl<=0||dot(gn,wi)<=0)return 0;
- float cone=1;if(l.extra1.z>1){float cosA=dot(-wi,l.ay.xyz);cone=smoothstep(l.extra1.w,min(1.,l.extra1.w+.08),cosA);if(l.extra1.z==3)cone*=saturate(cosA);}
+ float cone=1;if(l.extra1.z>1){float cosA=dot(-wi,l.ay.xyz);cone=smoothstep(l.extra1.w-.001,min(1.,l.extra1.w+.08),cosA);if(l.extra1.z==3)cone*=saturate(cosA);}
  if(cone<=0)return 0;
  float attenuation=pow(saturate(1-dist/l.roughEmit.x),2)*l.roughEmit.y*12/(1+dist*dist);
  float pdf;float3 f=evalBSDF(n,wo,wi,c,metal,rough,ior,spec,prob,pdf);
