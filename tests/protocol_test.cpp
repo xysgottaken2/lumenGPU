@@ -1,8 +1,13 @@
 #include "../native/protocol.hpp"
+#include "../native/primitives.hpp"
 #include <cassert>
 #include <fstream>
 #include <iterator>
 int main(int argc,char** argv){
+ for(bool corner:{false,true}){auto v=primitives::wedge(corner);assert(v.size()==(corner?18:24));V inside{corner?.2f:0.f,-.25f,.2f};for(size_t i=0;i<v.size();i+=3){auto n=triangleNormal(v[i],v[i+1],v[i+2]);assert(primitives::dot(n,primitives::sub(inside,v[i]))<0);}}
+ for(unsigned style=0;style<3;++style){auto v=primitives::truss(4,style);assert(!v.empty()&&v.size()%3==0);for(auto a:v){assert(std::isfinite(a.x)&&std::isfinite(a.y)&&std::isfinite(a.z));assert(std::fabs(a.x)<.51f&&std::fabs(a.y)<.53f&&std::fabs(a.z)<.51f);}}
+ assert(primitives::truss(4,0).size()>primitives::truss(4,1).size());assert(primitives::truss(4,1).size()>primitives::truss(4,2).size());assert(primitives::bays(512)==256);
+
  {Scene fp;fp.parts.resize(3);fp.characterCount=2;fp.firstPerson=true;
  assert(instanceVisibility(fp,0)==3);assert(instanceVisibility(fp,1)==2);assert(instanceVisibility(fp,2)==2);
  fp.firstPerson=false;assert(instanceVisibility(fp,2)==3);

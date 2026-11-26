@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.8.4)')
+print('[LumenGPU] Client starting (0.8.5)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -225,6 +225,28 @@ task.spawn(function()
         else task.wait(.15) end
     end
 end)
+-- Probe a real queryable wedge once per type to match Roblox's local high edge/corner.
+local wedgeOrientation={}
+local function orientWedge(obj,c,size,shape)
+    local key=obj.ClassName..tostring(shape)
+    local rotation=wedgeOrientation[key]
+    if rotation==nil and obj.CanQuery and obj:IsDescendantOf(workspace) then
+        local rp=RaycastParams.new();rp.FilterType=Enum.RaycastFilterType.Include;rp.FilterDescendantsInstances={obj};rp.RespectCanCollide=false
+        local best=-math.huge;local sx,sz=1,1
+        for _,x in {-1,1} do for _,z in {-1,1} do
+            local hit=workspace:Raycast(c:PointToWorldSpace(Vector3.new(x*size.X*.4,size.Y*.6,z*size.Z*.4)),-c.UpVector*size.Y*1.2,rp)
+            if hit then local h=c:PointToObjectSpace(hit.Position).Y;if h>best+size.Y*.001 then best=h;sx=x;sz=z end end
+        end end
+        if best>-math.huge then
+            if shape==-1 then rotation=sz==1 and 0 or math.pi
+            else rotation=sx==1 and (sz==1 and 0 or math.pi/2) or (sz==1 and -math.pi/2 or math.pi) end
+            wedgeOrientation[key]=rotation
+        end
+    end
+    rotation=rotation or 0
+    if math.abs(rotation)==math.pi/2 then size=Vector3.new(size.Z,size.Y,size.X) end
+    return c*CFrame.Angles(0,rotation,0),size
+end
 local function materialPart(obj)
     local function num(k,v,lo,hi)
         local x=obj:GetAttribute(k);if type(x)~='number' or x~=x then return v end;return math.clamp(x,lo,hi)
@@ -237,7 +259,16 @@ local function materialPart(obj)
     local color=obj:GetAttribute('PathBaseColor');if typeof(color)~='Color3' then color=obj.Color end
     local ec=obj:GetAttribute('PathEmissionColor');if typeof(ec)~='Color3' then ec=color end
     local c=obj.CFrame;local size=obj.Size;local shape=0
-    if obj:IsA('Part') then if obj.Shape==Enum.PartType.Ball then shape=1 elseif obj.Shape==Enum.PartType.Cylinder then shape=2 end end
+    if obj:IsA('WedgePart') then shape=-1
+    elseif obj:IsA('CornerWedgePart') then shape=-2
+    elseif obj:IsA('TrussPart') then
+        shape=obj.Style==Enum.Style.NoSupports and -5 or obj.Style==Enum.Style.BridgeStyleSupports and -4 or -3
+        if size.X>size.Y and size.X>=size.Z then c=c*CFrame.Angles(0,0,-math.pi/2);size=Vector3.new(size.Y,size.X,size.Z)
+        elseif size.Z>size.Y and size.Z>=size.X then c=c*CFrame.Angles(math.pi/2,0,0);size=Vector3.new(size.X,size.Z,size.Y) end
+    elseif obj:IsA('Part') then
+        if obj.Shape==Enum.PartType.Ball then shape=1 elseif obj.Shape==Enum.PartType.Cylinder then shape=2 elseif obj.Shape==Enum.PartType.Wedge then shape=-1 elseif obj.Shape==Enum.PartType.CornerWedge then shape=-2 end
+    end
+    if shape==-1 or shape==-2 then c,size=orientWedge(obj,c,size,shape) end
     local e,special=meshEntry(obj)
     if e and e.state=='ready' then
         shape=e.id
@@ -284,7 +315,7 @@ local function track(obj)
     tracked[obj][1]=obj:GetPropertyChangedSignal('CFrame'):Connect(promote)
     tracked[obj][2]=obj:GetPropertyChangedSignal('Anchored'):Connect(promote)
     tracked[obj][3]=obj.Changed:Connect(function(prop)
-        if not dynamic[obj] and (prop=='Size' or prop=='Color' or prop=='Material' or prop=='Reflectance' or prop=='Transparency' or prop=='Shape' or prop=='Name') then dirty=true end
+        if not dynamic[obj] and (prop=='Size' or prop=='Color' or prop=='Material' or prop=='Reflectance' or prop=='Transparency' or prop=='Shape' or prop=='Style' or prop=='Name') then dirty=true end
     end)
     tracked[obj][4]=obj.AttributeChanged:Connect(function() if not dynamic[obj] then dirty=true end end)
     if not obj.Anchored then dynamic[obj]=true end
@@ -698,4 +729,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.8.4 anchored orbit and keyboard forwarding installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.8.5 wedge, corner wedge and truss support installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')

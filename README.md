@@ -11,3 +11,5 @@ V0.8.2: scroll zoom with F2 capture, first-person at minimum zoom, Roblox camera
 V0.8.3 preview: third-person free cursor, first-person lock, RMB orbit, simple ScreenGui HUD and Studio VirtualInput mouse clicks. See README.txt for unsupported UI features and runtime caveats.
 
 V0.8.4: anchored RMB orbit and right/middle-click plus keyboard edge forwarding to Studio. Native F1/F2/F11/Esc reserved. See README.txt for limitations.
+
+V0.8.5: native wedge/corner wedge triangle geometry and approximate open trusses in all three styles. No EditableMesh permission required for these shapes. See README.txt.

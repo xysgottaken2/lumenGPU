@@ -118,7 +118,7 @@ func valid(u Update) bool {
 					return false
 				}
 			}
-			if p.Metal < 0 || p.Metal > 1 || p.Rough < 0 || p.Rough > 1 || p.Emit < 0 || p.Emit > 50 || p.Transmission<0 || p.Transmission>1 || (p.IOR!=0 && (p.IOR<1 || p.IOR>3)) || p.Shape<0 || p.Shape>16777215 || p.Shape!=math.Trunc(p.Shape) || p.Specular<0 || p.Specular>1 {
+			if p.Metal < 0 || p.Metal > 1 || p.Rough < 0 || p.Rough > 1 || p.Emit < 0 || p.Emit > 50 || p.Transmission<0 || p.Transmission>1 || (p.IOR!=0 && (p.IOR<1 || p.IOR>3)) || p.Shape< -5 || p.Shape>16777215 || p.Shape!=math.Trunc(p.Shape) || p.Specular<0 || p.Specular>1 {
 				return false
 			}
 		}
@@ -225,7 +225,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("LUMEN GPU 0.8.4 | Native bridge at http://" + addr + " | Ctrl+C to stop")
+	fmt.Println("LUMEN GPU 0.8.5 | Native bridge at http://" + addr + " | Ctrl+C to stop")
 	s := http.Server{Handler: (&Bridge{}).handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
 	log.Fatal(s.Serve(l))
 }
