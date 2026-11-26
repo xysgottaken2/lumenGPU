@@ -45,6 +45,7 @@ type Environment struct {
  SunSize float64 `json:"sunSize"`
  Brightness float64 `json:"brightness"`
  Celestial bool `json:"celestial"`
+ FirstPerson bool `json:"firstPerson"`
 }
 type Update struct {
  Environment *Environment `json:"environment,omitempty"`

@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.8)')
+print('[LumenGPU] Client starting (0.8.2)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -27,6 +27,13 @@ local input={}
 local lastInput=0
 local yaw,pitch=0,0
 local orbitDistance=10
+local firstPerson=false
+local previousAutoRotate=nil
+local rotatedHumanoid=nil
+local function restoreRotation()
+    if rotatedHumanoid and rotatedHumanoid.Parent and previousAutoRotate~=nil then rotatedHumanoid.AutoRotate=previousAutoRotate end
+    rotatedHumanoid=nil;previousAutoRotate=nil
+end
 local oldFov=70
 local controls=nil
 local oldCameraType=nil
@@ -56,7 +63,7 @@ task.spawn(function()
 end)
 local function release(reason)
     if not external then return end
-    external=false; input={}
+    external=false; input={};firstPerson=false;restoreRotation()
     print('[LumenGPU] External controls released: '..tostring(reason or 'stopped'))
     if controls then pcall(function() controls:Enable() end) end
     local cam=workspace.CurrentCamera; if cam then cam.CameraType=oldCameraType or Enum.CameraType.Custom;cam.FieldOfView=oldFov end
@@ -75,16 +82,16 @@ remote.OnClientEvent:Connect(function(kind,c)
     if not external then
         local look=cam.CFrame.LookVector; yaw=math.atan2(-look.X,-look.Z); pitch=math.asin(math.clamp(look.Y,-1,1))
         local char=player.Character;local head=char and char:FindFirstChild('Head')
-        if head then orbitDistance=math.clamp((cam.CFrame.Position-head.Position).Magnitude,6,20) end
+        if head then orbitDistance=math.clamp((cam.CFrame.Position-head.Position).Magnitude,.5,40) end
         oldCameraType=cam.CameraType;oldFov=cam.FieldOfView; external=true
         disableDefaultControls()
         print('[LumenGPU] External controls captured')
         cam.CameraType=Enum.CameraType.Scriptable
     end
     local sensitivity=math.clamp(c.sensitivity or 1,.1,5)*.0025
-    if (c.distance or 0)>0 then orbitDistance=math.clamp(c.distance,2,40) end
+    if (c.distance or 0)>0 then orbitDistance=math.clamp(c.distance,.5,40) end
     if (c.fov or 0)>0 then cam.FieldOfView=math.clamp(c.fov,35,110) end
-    yaw-=math.clamp(c.dx or 0,-2000,2000)*sensitivity; pitch=math.clamp(pitch-math.clamp(c.dy or 0,-2000,2000)*sensitivity,-1.15,1.15)
+    yaw-=math.clamp(c.dx or 0,-2000,2000)*sensitivity; pitch=math.clamp(pitch-math.clamp(c.dy or 0,-2000,2000)*sensitivity,-1.553,1.553)
     input=c;lastInput=os.clock()
     local hum=player.Character and player.Character:FindFirstChildOfClass('Humanoid'); if hum and c.jump then hum.Jump=true end
 end)
@@ -351,6 +358,12 @@ local function applyMovement()
     if not active or not external then return end
     if os.clock()-lastInput>.65 then release('input timeout');return end
     local rot=CFrame.fromOrientation(0,yaw,0)
+    local char=player.Character;local hum=char and char:FindFirstChildOfClass('Humanoid');local root=char and char:FindFirstChild('HumanoidRootPart')
+    if firstPerson and hum and root and hum.Health>0 and not hum.SeatPart then
+        if rotatedHumanoid~=hum then restoreRotation();rotatedHumanoid=hum;previousAutoRotate=hum.AutoRotate end
+        hum.AutoRotate=false
+        root.CFrame=CFrame.new(root.Position)*rot
+    else restoreRotation() end
     local move=rot.RightVector*math.clamp(input.x or 0,-1,1)+rot.LookVector*math.clamp(input.z or 0,-1,1)
     player:Move(move.Magnitude>1 and move.Unit or move,false)
 end
@@ -359,11 +372,18 @@ local function updateCamera()
     local char=player.Character;local head=char and char:FindFirstChild('Head');local cam=workspace.CurrentCamera
     if not head or not cam then return end
     local rot=CFrame.fromOrientation(0,yaw,0);local look=rot*CFrame.Angles(pitch,0,0)
-    local pivot=head.Position+Vector3.new(0,.5,0)
-    local offset=-look.LookVector*orbitDistance
+    local pivot=head.Position+Vector3.new(0,.15,0)
+    local minZoom=math.clamp(player.CameraMinZoomDistance,.5,40)
+    local maxZoom=math.clamp(player.CameraMaxZoomDistance,minZoom,40)
+    local distance=math.clamp(orbitDistance,minZoom,maxZoom)
+    firstPerson=player.CameraMode==Enum.CameraMode.LockFirstPerson or distance<=.75
+    cam.CameraType=Enum.CameraType.Scriptable
+    if firstPerson then cam.CFrame=CFrame.new(pivot)*look;cam.Focus=CFrame.new(pivot+look.LookVector*12);return end
+    local offset=-look.LookVector*distance
     local params=RaycastParams.new();params.FilterType=Enum.RaycastFilterType.Exclude;params.FilterDescendantsInstances={char};params.RespectCanCollide=true
     local hit=workspace:Raycast(pivot,offset,params)
     if hit then offset=offset.Unit*math.max(.35,hit.Distance-.35) end
+    if offset.Magnitude<=.75 then firstPerson=true;cam.CFrame=CFrame.new(pivot)*look;cam.Focus=CFrame.new(pivot+look.LookVector*12);return end
     cam.CameraType=Enum.CameraType.Scriptable
     cam.CFrame=CFrame.new(pivot+offset)*look;cam.Focus=CFrame.new(pivot)
 end
@@ -379,7 +399,9 @@ RunService:BindToRenderStep('LumenGPU_ExternalCamera',Enum.RenderPriority.Camera
     local cam=workspace.CurrentCamera;if not cam then return end
     local c=cam.CFrame;local fast=nil
     local sky=LocalLighting:FindFirstChildOfClass('Sky')
-    local environment={clock=LocalLighting.ClockTime,sunSize=sky and sky.SunAngularSize or 11,brightness=LocalLighting.Brightness,celestial=not sky or sky.CelestialBodiesShown}
+    local head=player.Character and player.Character:FindFirstChild('Head')
+    local hideAvatar=external and firstPerson or (not external and (player.CameraMode==Enum.CameraMode.LockFirstPerson or (head and (c.Position-head.Position).Magnitude<=.9)))
+    local environment={clock=LocalLighting.ClockTime,sunSize=sky and sky.SunAngularSize or 11,brightness=LocalLighting.Brightness,celestial=not sky or sky.CelestialBodiesShown,firstPerson=hideAvatar==true}
     if fastElapsed>=1/30 then fastElapsed=fastElapsed%(1/30);fast=fastSnapshot() end
     -- Character and camera are sampled during the same render step.
     remote:FireServer('camera',{p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),f=vec(c.LookVector),fov=cam.FieldOfView,sun=vec(LocalLighting:GetSunDirection()),environment=environment},avatarSnapshot(),fast)
@@ -573,4 +595,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.8 day/night and wavelet denoiser installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.8.2 mouse-wheel zoom and first-person camera installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally and press P. Existing LUMEN installations are not removed; stop their renderer.')

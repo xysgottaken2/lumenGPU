@@ -85,7 +85,7 @@ float3 path(float3 o,float3 d,inout uint seed,out float4 guide,out float4 alb){
  float3 beta=1,L=0;guide=0;alb=0;float prevPdf=0;bool prevDelta=true;bool prevSkyNEE=false;
  if(options.w==3)return sky(d)+visibleSun(d);
  for(uint i=0;i<=uint(options.x);++i){
-  RayQuery<RAY_FLAG_FORCE_OPAQUE> q;q.TraceRayInline(scene,RAY_FLAG_NONE,255,ray(o,d,quality.x));while(q.Proceed()){}
+  RayQuery<RAY_FLAG_FORCE_OPAQUE> q;q.TraceRayInline(scene,RAY_FLAG_NONE,i==0?1u:2u,ray(o,d,quality.x));while(q.Proceed()){}
   if(q.CommittedStatus()!=COMMITTED_TRIANGLE_HIT){if(options.w>=4)return 1;L+=beta*sky(d)*(prevDelta||!prevSkyNEE?1:powerWeight(prevPdf,1/(2*PI)));if(prevDelta)L+=beta*visibleSun(d);break;}
   Material m=mats[q.CommittedInstanceID()];uint primitive=q.CommittedPrimitiveIndex();uint shape=uint(m.ax.w);
   float3 localP=q.CommittedObjectRayOrigin()+q.CommittedObjectRayDirection()*q.CommittedRayT();
