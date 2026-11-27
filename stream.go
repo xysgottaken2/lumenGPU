@@ -66,6 +66,7 @@ func(b *Bridge)splitState(channel int)(State,uint64){
  switch channel{
  case 0:s.Parts=b.characterParts;s.Scene=b.characterRevision;return s,s.Seq
  case 1:s.Parts=b.worldParts;s.Scene=b.worldRevision;return s,s.Scene
+ case 3:s.Parts=b.lights;s.Scene=b.lightRevision;return s,s.Scene
  default:s.Parts=b.avatarParts;s.Scene=b.movingRevision;return s,s.Scene
  }
 }

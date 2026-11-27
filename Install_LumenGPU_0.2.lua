@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.9.9)')
+print('[LumenGPU] Client starting (0.9.9a)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -790,35 +790,43 @@ for _,o in workspace:GetDescendants() do trackLight(o) end
 workspace.DescendantAdded:Connect(trackLight)
 workspace.DescendantRemoving:Connect(function(o) lightObjects[o]=nil end)
 local faceVector={ [Enum.NormalId.Right]=Vector3.xAxis,[Enum.NormalId.Left]=-Vector3.xAxis,[Enum.NormalId.Top]=Vector3.yAxis,[Enum.NormalId.Bottom]=-Vector3.yAxis,[Enum.NormalId.Back]=Vector3.zAxis,[Enum.NormalId.Front]=-Vector3.zAxis }
+local lastLightScan=-100
+local lastLightWarning=-100
+local lastLightCount=-1
 local function lightRows()
     local cam=workspace.CurrentCamera;if not cam then return {} end
+    if os.clock()-lastLightScan>2 then
+        lastLightScan=os.clock()
+        for _,o in workspace:GetDescendants() do trackLight(o) end
+    end
     local candidates={}
-    local cameraLights={}
-    for _,o in cam:GetDescendants() do if o:IsA('PointLight') or o:IsA('SpotLight') or o:IsA('SurfaceLight') then cameraLights[o]=true end end
-    local all=table.clone(lightObjects);for o in cameraLights do all[o]=true end
-    for o in all do
-        if o.Parent and o:IsDescendantOf(workspace) and o.Enabled and o.Range>0 and o.Brightness>0 then
-            local parent=o.Parent;local cf=parent:IsA('Attachment') and parent.WorldCFrame or parent:IsA('BasePart') and parent.CFrame or nil
-            if cf then
-                local kind=o:IsA('PointLight') and 1 or o:IsA('SpotLight') and 2 or 3
-                local localDir=kind==1 and Vector3.zAxis or (faceVector[o.Face] or -Vector3.zAxis)
-                local dir=cf:VectorToWorldSpace(localDir);local pos=cf.Position
-                if kind~=1 and parent:IsA('BasePart') then pos+=cf:VectorToWorldSpace(localDir*parent.Size*.5)+dir*.015 end
-                local cone=kind==1 and -1 or math.cos(math.rad(o.Angle*.5))
-                local col=o.Color
-                candidates[#candidates+1]={d=(pos-cam.CFrame.Position).Magnitude,row={p=vec(pos),r={1,0,0},u={0,1,0},b={0,0,1},s={math.clamp(o.Range,.01,100000),1,1},c={col.R,col.G,col.B},emit=math.clamp(o.Brightness,0,50),emissionColor={col.R,col.G,col.B},shape=0,extra={0,0,0,0,0,0,kind,cone},tex={0,0,0,0,0,0,0,0},metal=0,rough=1,specular=0,transmission=0,ior=1.5,lightDir=dir}}
-            end
-        end
+    local char=player.Character
+    for o in lightObjects do
+        local ok,result=pcall(function()
+            if not o.Parent or not o:IsDescendantOf(workspace) or not o.Enabled or o.Range<=0 or o.Brightness<=0 then return nil end
+            local parent=o.Parent
+            local cf=parent:IsA('Attachment') and parent.WorldCFrame or parent:IsA('BasePart') and parent.CFrame or nil
+            if not cf then return nil end
+            local kind=o:IsA('PointLight') and 1 or o:IsA('SpotLight') and 2 or 3
+            local localDir=kind==1 and Vector3.zAxis or (faceVector[o.Face] or -Vector3.zAxis)
+            local dir=cf:VectorToWorldSpace(localDir)
+            local pos=cf.Position
+            if kind~=1 and parent:IsA('BasePart') then pos+=cf:VectorToWorldSpace(localDir*parent.Size*.5)+dir*.025 end
+            local cone=kind==1 and -1 or math.cos(math.rad(o.Angle*.5))
+            local col=o.Color
+            local basis=CFrame.lookAt(Vector3.zero,dir,math.abs(dir.Y)>.99 and Vector3.xAxis or Vector3.yAxis)
+            local held=char and o:IsDescendantOf(char) or o:IsDescendantOf(cam)
+            local distance=(pos-cam.CFrame.Position).Magnitude
+            local priority=held and -100000+distance or math.max(0,distance-o.Range)
+            return {d=priority,row={p=vec(pos),r=vec(basis.RightVector),u=vec(basis.UpVector),b=vec(dir),s={math.clamp(o.Range,.01,100000),1,1},c={col.R,col.G,col.B},emit=math.clamp(o.Brightness,0,50),emissionColor={col.R,col.G,col.B},shape=0,extra={0,0,0,0,0,o.Shadows and 1 or 0,kind,math.clamp(cone,-1,1)},metal=0,rough=1,specular=0,transmission=0,ior=1.5}}
+        end)
+        if ok and result then candidates[#candidates+1]=result
+        elseif not ok and os.clock()-lastLightWarning>3 then lastLightWarning=os.clock();warn('[LumenGPU Lights] '..tostring(result)) end
     end
     table.sort(candidates,function(a,b) return a.d<b.d end)
     local rows={}
-    for i=1,math.min(#candidates,64) do
-        local row=candidates[i].row
-        local dir=row.lightDir;row.lightDir=nil
-        local cf=CFrame.lookAt(Vector3.zero,dir,math.abs(dir.Y)>.99 and Vector3.xAxis or Vector3.yAxis)
-        row.r=vec(cf.RightVector);row.u=vec(cf.UpVector);row.b=vec(cf.LookVector)
-        rows[#rows+1]=row
-    end
+    for k=1,math.min(#candidates,64) do rows[k]=candidates[k].row end
+    if #rows~=lastLightCount then lastLightCount=#rows;print('[LumenGPU Lights] active '..#rows..' / '..#candidates) end
     return rows
 end
 local function refreshWorld()
@@ -1040,9 +1048,20 @@ end)
 -- Only traverse moving objects here; the camera loop never scans the world.
 local cachedMoving={}
 local cachedLights={}
+local lightsJSON=nil
+local lastLightsSend=-100
 task.spawn(function()
     while task.wait(1/30) do
-        if active then local ok,rows=pcall(lightRows);if ok then cachedLights=rows end else cachedLights={} end
+        if active then
+            local ok,rows=pcall(lightRows)
+            if ok then
+                cachedLights=rows
+                local encoded=HTTP:JSONEncode(rows)
+                if encoded~=lightsJSON or os.clock()-lastLightsSend>1 then
+                    lightsJSON=encoded;lastLightsSend=os.clock();remote:FireServer('lights',cachedLights)
+                end
+            elseif os.clock()-lastLightWarning>3 then lastLightWarning=os.clock();warn('[LumenGPU Lights] capture failed: '..tostring(rows)) end
+        else cachedLights={};lightsJSON=nil end
     end
 end)
 task.spawn(function()
@@ -1059,9 +1078,8 @@ task.spawn(function()
     end
 end)
 local function fastSnapshot()
-    if #particleRows==0 and #cachedLights==0 then return cachedMoving end
-    local rows=table.clone(cachedLights)
-    for _,row in cachedMoving do if #rows>=1024-#particleRows then break end;rows[#rows+1]=row end
+    if #particleRows==0 then return cachedMoving end
+    local rows=table.clone(cachedMoving)
     for _,row in particleRows do if #rows>=1024 then break end;rows[#rows+1]=row end
     return rows
 end
@@ -1291,6 +1309,7 @@ local latestAvatar={} -- other moving objects
 local latestCharacter={}
 local latestEnvironment=nil;local latestSun=nil
 local latestHUD={};local hudSerial=0;local sentHUD=-1
+local latestLights={};local lightSerial=0;local sentLights=-1
 local cameraSerial=0;local sentCamera=-1;local cameraSentAt=0
 local avatarSerial=0;local sentAvatar=-1
 local latestWorld=nil
@@ -1321,14 +1340,14 @@ local function connectCamera()
  local ok,c=pcall(function() return HTTP:CreateWebStreamClient(Enum.WebStreamClientType.WebSocket,{Url='ws://127.0.0.1:8765/api/ws'}) end)
  if not ok or not c then return end
  cameraWS=c
- local function opened() if cameraWS==c then cameraOpen=true;outstanding=0;sentCamera=-1;sentHUD=-1;lastCameraAck=os.clock() end end
+ local function opened() if cameraWS==c then cameraOpen=true;outstanding=0;sentCamera=-1;sentHUD=-1;sentLights=-1;lastCameraAck=os.clock() end end
  c.Opened:Connect(opened)
  c.MessageReceived:Connect(function(msg)
   if cameraWS~=c or not owner then return end
   outstanding=math.max(0,outstanding-1);lastCameraAck=os.clock()
   local good,ctrl=pcall(function() return HTTP:JSONDecode(msg) end)
   if good and type(ctrl)=='table' and not ctrl.error then ctrl.transport='WS';remote:FireClient(owner,'input',ctrl)
-  elseif os.clock()-lastCameraWarning>=2 then lastCameraWarning=os.clock();warn('[LumenGPU] Camera update rejected: '..tostring(good and type(ctrl)=='table' and ctrl.error or 'invalid reply')) end
+  else sentLights=-1;if os.clock()-lastCameraWarning>=2 then lastCameraWarning=os.clock();warn('[LumenGPU] Camera update rejected: '..tostring(good and type(ctrl)=='table' and ctrl.error or 'invalid reply')) end end
  end)
  local function failed() if cameraWS==c then closeCamera();cameraRetry=os.clock()+1 end end
  c.Closed:Connect(failed);c.Error:Connect(failed)
@@ -1362,7 +1381,7 @@ end
 local function vec(v) return {v.X,v.Y,v.Z} end
 remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
     if cmd=='start' and (not owner or owner==player) then
-        if not owner then owner=player; latest=nil; latestAvatar={};latestCharacter={};latestHUD={};hudSerial+=1;sentHUD=-1;cameraSerial=0;sentCamera=-1;avatarSerial=0;sentAvatar=-1; latestWorld=nil;worldSerial=0;pending=nil;lastSnapshot=-100; lastPartsJSON=nil; print('[LumenGPU] Local bridge started') end
+        if not owner then owner=player; latest=nil; latestAvatar={};latestCharacter={};latestHUD={};hudSerial+=1;sentHUD=-1;latestLights={};lightSerial+=1;sentLights=-1;cameraSerial=0;sentCamera=-1;avatarSerial=0;sentAvatar=-1; latestWorld=nil;worldSerial=0;pending=nil;lastSnapshot=-100; lastPartsJSON=nil; print('[LumenGPU] Local bridge started') end
         remote:FireClient(player,'status','Waiting for HTTP')
     elseif cmd=='stop' and owner==player then owner=nil; latest=nil;pending=nil;closeWS()
     elseif cmd=='lumenusMesh' and owner==player then
@@ -1433,6 +1452,7 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
         if type(avatar)~='table' or #avatar>128 or #pending.rows+#avatar>pending.count then pending=nil else for _,part in avatar do pending.rows[#pending.rows+1]=part end end
     elseif cmd=='worldEnd' and owner==player and pending and data==pending.serial then
         if #pending.rows==pending.count then latestWorld=pending.rows;worldSerial=pending.serial;print('[LumenGPU] Accepted client world '..worldSerial..': '..#latestWorld..' static parts') end;pending=nil
+    elseif cmd=='lights' and owner==player and type(data)=='table' and #data<=64 then latestLights=data;lightSerial+=1
     elseif cmd=='hud' and owner==player and type(data)=='table' and #data<=256 then latestHUD=data;hudSerial+=1
     elseif cmd=='camera' and owner==player and type(data)=='table' then
         if type(data.p)=='table' and #data.p==3 and type(data.r)=='table' and #data.r==3 and type(data.u)=='table' and #data.u==3 and type(data.f)=='table' and #data.f==3 and type(data.fov)=='number' then
@@ -1460,20 +1480,22 @@ task.spawn(function()
      if sentCamera==cameraSerial and now-cameraSentAt<.1 then return end
      local serial=cameraSerial
      local hud=sentHUD~=hudSerial and latestHUD or nil
-     local payload=HTTP:JSONEncode({camera=latest,character=latestCharacter,sun=latestSun or vec(Lighting:GetSunDirection()),environment=latestEnvironment,hud=hud})
+     local lights=sentLights~=lightSerial and latestLights or nil
+     local payload=HTTP:JSONEncode({camera=latest,character=latestCharacter,sun=latestSun or vec(Lighting:GetSunDirection()),environment=latestEnvironment,hud=hud,lights=lights})
      outstanding+=1
      local sent,e=pcall(function() cameraWS:Send(payload) end)
      if not sent then closeCamera();error(e) end
-     sentCamera=serial;cameraSentAt=now;if hud then sentHUD=hudSerial end
+     sentCamera=serial;cameraSentAt=now;if hud then sentHUD=hudSerial end;if lights then sentLights=lightSerial end
     elseif now-lastHTTP>=.15 then
      -- Compatibility fallback retains geometry when both sockets are unavailable.
      lastHTTP=now
      local hud=sentHUD~=hudSerial and latestHUD or nil
-     local update={camera=latest,character=latestCharacter,sun=latestSun or vec(Lighting:GetSunDirection()),environment=latestEnvironment,hud=hud}
+     local lights=sentLights~=lightSerial and latestLights or nil
+     local update={camera=latest,character=latestCharacter,sun=latestSun or vec(Lighting:GetSunDirection()),environment=latestEnvironment,hud=hud,lights=lights}
      -- Geometry fallback is owned by the independent geometry task.
      local res=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/update-controls',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode(update)})
      if not res.Success then error('HTTP '..res.StatusCode..': '..tostring(res.Body):sub(1,180)) end
-     if hud then sentHUD=hudSerial end
+     if hud then sentHUD=hudSerial end;if lights then sentLights=lightSerial end
      if owner then local ctrl=HTTP:JSONDecode(res.Body);ctrl.transport='HTTP';remote:FireClient(owner,'input',ctrl) end
     end
    end)
@@ -1514,4 +1536,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.9.9 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.9.9a Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')

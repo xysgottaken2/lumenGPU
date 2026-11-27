@@ -199,9 +199,9 @@ bool blocked(float3 o,float3 d,float limit){RayQuery<RAY_FLAG_FORCE_OPAQUE|RAY_F
 // Straight-line colored shadow transmission. Each boundary contributes
 // sqrt(tint * transmission), so a closed pane applies its tint once.
 // This is thin-glass visibility, not refracted caustic transport.
-float3 lightVisibilityTo(float3 o,float3 d,float limit){
+float3 lightVisibilityTo(float3 o,float3 d,float limit,bool localSource){
  if(limit<=.001)return 1;
- if(switches.z<=0)return blocked(o,d,limit)?float3(0,0,0):float3(1,1,1);
+ if(switches.z<=0&&!localSource)return blocked(o,d,limit)?float3(0,0,0):float3(1,1,1);
  float3 visibility=1;float remaining=limit;
  [loop]for(uint layer=0;layer<16;++layer){
   if(remaining<=.001)return visibility;
@@ -210,7 +210,9 @@ float3 lightVisibilityTo(float3 o,float3 d,float limit){
   while(q.Proceed()){}
   if(q.CommittedStatus()!=COMMITTED_TRIANGLE_HIT)return visibility;
   Material m=mats[q.CommittedInstanceID()];
-  float trans=saturate(m.roughEmit.z)*(1-saturate(m.colorMetal.w));
+  // A point source inside its own box must not shadow itself. Only ignore the terminal box containing the source.
+  if(localSource&&uint(m.ax.w)==0){float3 endpoint=q.CommittedObjectRayOrigin()+q.CommittedObjectRayDirection()*(remaining+.007);if(all(abs(endpoint)<=.501))return visibility;}
+  float trans=saturate(m.roughEmit.z)*(1-saturate(m.colorMetal.w))*switches.z;
   if(trans<=.001)return 0;
   float ior=clamp(m.roughEmit.w,1.001,3);
   float f=(ior-1)/(ior+1);f*=f;
@@ -222,7 +224,7 @@ float3 lightVisibilityTo(float3 o,float3 d,float limit){
  // Conservatively reject rays whose layer budget was exhausted.
  return 0;
 }
-float3 lightVisibility(float3 o,float3 d){return lightVisibilityTo(o,d,quality.x);}
+float3 lightVisibility(float3 o,float3 d){return lightVisibilityTo(o,d,quality.x,false);}
 float smith(float n,float a2){return 2*n/max(1e-6,n+sqrt(a2+(1-a2)*n*n));}
 float3 fresnel(float v,float3 f0){return f0+(1-f0)*pow(1-saturate(v),5);}
 float powerWeight(float a,float b){return a*a/max(1e-12,a*a+b*b);}
@@ -242,14 +244,14 @@ float localLightWeight(Material l,float3 p,float3 gn,float3 n,out float3 wi,out 
  if(dist<.006||dist>=l.roughEmit.x)return 0;
  wi=delta/dist;float nl=dot(n,wi);if(nl<=0||dot(gn,wi)<=0)return 0;
  float cone=1;if(l.extra1.z>1){float cosA=dot(-wi,l.ay.xyz);cone=smoothstep(l.extra1.w-.001,min(1.,l.extra1.w+.08),cosA);if(l.extra1.z==3)cone*=saturate(cosA);}
- attenuation=pow(saturate(1-dist/l.roughEmit.x),2)*l.roughEmit.y*12/(1+dist*dist)*cone;
+ attenuation=pow(saturate(1-dist/l.roughEmit.x),2)*l.roughEmit.y*3.0*cone;
  return attenuation*nl*max(.001,luma(linearColor(l.colorMetal.xyz)));
 }
-float3 sampleLocalLight(float3 p,float3 gn,float3 n,float3 wo,float3 c,float metal,float rough,float ior,float spec,float prob,inout uint seed){
+float3 sampleLocalLight(float3 p,float3 gn,float3 n,float3 wo,float3 c,float metal,float rough,float ior,float spec,float prob,inout uint seed,bool primary){
  uint flags=visualFlags(),count=flags&127u;if(count==0)return 0;
- uint base=flags>>9,k=min(count,4u),selected=base;float sum=0,chosenWeight=0;
+ uint base=flags>>9,k=primary?count:min(count,4u),selected=base;float sum=0,chosenWeight=0;
  [loop]for(uint j=0;j<k;++j){
-  uint at=base+(count<=4?j:min(count-1,uint(rnd(seed)*count)));
+  uint at=base+(k==count?j:min(count-1,uint(rnd(seed)*count)));
   float3 wi;float dist,attenuation;float w=localLightWeight(mats[at],p,gn,n,wi,dist,attenuation);
   if(w<=0)continue;sum+=w;if(rnd(seed)*sum<w){selected=at;chosenWeight=w;}
  }
@@ -257,7 +259,7 @@ float3 sampleLocalLight(float3 p,float3 gn,float3 n,float3 wo,float3 c,float met
  Material l=mats[selected];float3 wi;float dist,attenuation;
  float selectedCheck=localLightWeight(l,p,gn,n,wi,dist,attenuation);if(selectedCheck<=0)return 0;
  float pdf;float3 f=evalBSDF(n,wo,wi,c,metal,rough,ior,spec,prob,pdf);
- return f*dot(n,wi)*linearColor(l.colorMetal.xyz)*attenuation*(float(count)*sum/(float(k)*chosenWeight))*lightVisibilityTo(p+gn*.003,wi,max(.001,dist-.007));
+ return f*dot(n,wi)*linearColor(l.colorMetal.xyz)*attenuation*(float(count)*sum/(float(k)*chosenWeight))*(l.extra1.x>0.5?lightVisibilityTo(p+gn*.003,wi,max(.001,dist-.007),true):float3(1,1,1));
 }
 float3 sunDirection(inout uint seed){float r=sqrt(rnd(seed))*sun.w,phi=2*PI*rnd(seed);return basis(normalize(sun.xyz),r*cos(phi),r*sin(phi),1);}
 float3 path(float3 o,float3 d,inout uint seed,out float4 guide,out float4 alb){
@@ -290,7 +292,7 @@ float3 path(float3 o,float3 d,inout uint seed,out float4 guide,out float4 alb){
   if(i==0)L+=c*(1-metal)*opaque*quality.w*lerp(.035,1,daylight());
   if(entering)L+=beta*linearColor(m.emitColor.xyz)*m.roughEmit.y;
   if(opaque>0&&entering){
-   L+=beta*opaque*sampleLocalLight(p,orientedGN,n,wo,c,metal,rough,ior,spec,prob,seed);
+   L+=beta*opaque*sampleLocalLight(p,orientedGN,n,wo,c,metal,rough,ior,spec,prob,seed,i==0);
    float3 wi=sunDirection(seed);float nl=dot(n,wi),pdf;
    float3 f=evalBSDF(n,wo,wi,c,metal,rough,ior,spec,prob,pdf);
    if(nl>0&&dot(orientedGN,wi)>0&&sunPower()>0)L+=beta*f*opaque*nl*sunTint()*5*sunPower()*lightVisibility(p+orientedGN*.003,wi);

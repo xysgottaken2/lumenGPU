@@ -58,6 +58,7 @@ type Environment struct {
  SkyBasis [9]float64 `json:"skyBasis"`
 }
 type Update struct {
+ Lights *[]Part `json:"lights,omitempty"`
  HUD *[]HUDItem `json:"hud,omitempty"`
  Environment *Environment `json:"environment,omitempty"`
 	Camera Camera  `json:"camera"`
@@ -98,6 +99,8 @@ type Bridge struct {
  worldParts []Part
  avatarParts []Part // moving world objects (legacy Avatar field)
  characterParts []Part
+ lights []Part
+ lightRevision uint64
  worldRevision,movingRevision,characterRevision uint64
  meshes map[uint32][]V
  meshUV map[uint32][]UV
@@ -120,12 +123,13 @@ func updateError(u Update) string {
  c:=u.Camera
  if !vec(c.P)||!axis(c.R)||!axis(c.U)||!axis(c.F)||!finite(c.Fov)||c.Fov<5||c.Fov>120{return "invalid camera"}
  if !axis(u.Sun){return "invalid sun direction"}
- for _,g:=range []struct{name string;parts *[]Part;limit int}{{"world",u.Parts,16384},{"moving",u.Avatar,1024},{"character",u.Character,64}}{
+ for _,g:=range []struct{name string;parts *[]Part;limit int}{{"world",u.Parts,16384},{"moving",u.Avatar,1024},{"character",u.Character,64},{"lights",u.Lights,64}}{
   if g.parts==nil{continue}
   if len(*g.parts)>g.limit{return g.name+": part count exceeds limit"}
   for j,p:=range *g.parts{
    reason:=""
    switch{
+   case g.name=="lights"&&(p.Extra[6]<1||p.Extra[6]>3):reason="not a local light"
    case !validShape(p.Shape):reason="invalid shape ID"
    case !validTexture(p.Tex):reason="invalid texture metadata"
    case !validExtra(p.Extra):reason="invalid material/light metadata"
@@ -145,6 +149,7 @@ func updateError(u Update) string {
 func (b *Bridge) apply(u Update,wantsControls bool) Control {return b.applyMode(u,wantsControls,false)}
 func (b *Bridge) applyMode(u Update,wantsControls,geometryOnly bool) Control {
 		b.mu.Lock()
+ if !geometryOnly&&u.Lights!=nil&&!slices.Equal(b.lights,*u.Lights){b.lights=*u.Lights;b.lightRevision++}
  if !geometryOnly&&u.HUD!=nil&&!slices.Equal(b.hud,*u.HUD){b.hud=*u.HUD;b.hudRevision++}
  if !geometryOnly {b.state.Camera=u.Camera;b.state.Sun=u.Sun;if u.Environment!=nil{e:=*u.Environment;b.state.Environment=&e}}
   changed:=false
@@ -172,6 +177,7 @@ func (b *Bridge) handler() http.Handler {
  mux.HandleFunc("/api/native-pose-ws",func(w http.ResponseWriter,r *http.Request){b.nativeSplitStream(w,r,0)})
  mux.HandleFunc("/api/native-world-ws",func(w http.ResponseWriter,r *http.Request){b.nativeSplitStream(w,r,1)})
  mux.HandleFunc("/api/native-moving-ws",func(w http.ResponseWriter,r *http.Request){b.nativeSplitStream(w,r,2)})
+ mux.HandleFunc("/api/native-lights-ws",func(w http.ResponseWriter,r *http.Request){b.nativeSplitStream(w,r,3)})
  mux.HandleFunc("/api/mesh",b.meshHandler)
  mux.HandleFunc("/api/texture",b.textureHandler)
  if b.lumenus!=nil {mux.HandleFunc("/api/lumenus",b.lumenus.handler)}
@@ -258,7 +264,7 @@ func main() {
  b.lumenus=worker
  defer worker.close()
  if len(os.Args)>1&&os.Args[1]=="--connect" {ctx,cancel:=signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM);session,e:=configureOAuth(ctx);cancel();if e!=nil{log.Printf("[Lumenus] Authorization failed: %v; continuing with local imports/API key",e)}else{worker.oauth=session;log.Println("[Lumenus] Roblox authorization successful")}}else if worker.key==""{log.Println("[Lumenus] Local-only mode. Run Connect-Roblox.bat for Roblox account authorization.")}
- fmt.Println("LUMEN GPU 0.9.9 | Lumenus session cache:",worker.dir)
+ fmt.Println("LUMEN GPU 0.9.9a | Lumenus session cache:",worker.dir)
  fmt.Println("Native bridge at http://" + addr + " | Ctrl+C to stop")
  s := http.Server{Handler: b.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
  ctx,stop:=signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM);defer stop()
