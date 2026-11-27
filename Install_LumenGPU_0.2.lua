@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.9.7)')
+print('[LumenGPU] Client starting (0.9.8)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -164,8 +164,18 @@ local function numericAsset(uri)
     if id and #id<=20 and not id:match('^0') then return id end
     return nil
 end
+local function assetReference(uri)
+    local numeric=numericAsset(uri);if numeric then return numeric end
+    if type(uri)~='string' then return nil end
+    local name=uri:match('^rbxasset://.*/([^/]+)$') or uri:match('^rbxasset://([^/]+)$') or uri:match('^local%-([%w_.%-]+)$')
+    if name then
+        name=string.lower(name)
+        if #name<=96 and name:match('^[a-z0-9_%.%-]+$') and not name:find('..',1,true) then return 'local-'..name end
+    end
+    return nil
+end
 local function discoverImage(uri)
-    local id=numericAsset(uri)
+    local id=assetReference(uri)
     if id and not externalImages[id] and imageCount<128 then
         imageCount+=1;externalImages[id]=imageCount;imageQueue[#imageQueue+1]={asset=id,slot=imageCount}
     end
@@ -228,8 +238,13 @@ task.spawn(function()
         if active and #imageQueue>0 then local q=table.remove(imageQueue,1);remote:FireServer('lumenusImage',q.asset,q.slot) end
     end
 end)
+local classicMeshes={['Torso']='torso.mesh',['Left Arm']='leftarm.mesh',['Right Arm']='rightarm.mesh',['Left Leg']='leftleg.mesh',['Right Leg']='rightleg.mesh'}
 local function meshEntry(obj)
     local content,key,special
+    local hum=obj.Parent and obj.Parent:FindFirstChildOfClass('Humanoid')
+    local classic=hum and hum.RigType==Enum.HumanoidRigType.R6 and classicMeshes[obj.Name]
+    local head=hum and obj.Name=='Head'
+    local localFallback=classic and ('local-'..classic) or (head and 'local-head.mesh' or nil)
     local cm=characterMesh(obj)
     if cm and tonumber(cm.MeshId) and tonumber(cm.MeshId)>0 then
         key='rbxassetid://'..tostring(cm.MeshId)
@@ -242,16 +257,18 @@ local function meshEntry(obj)
         special=obj:FindFirstChildOfClass('SpecialMesh')
         if special and special.MeshType==Enum.MeshType.FileMesh and special.MeshId~='' then key=special.MeshId
         elseif obj.Name=='Head' and obj.Parent==donorChar and donorHead then key=donorHead;special=nil
+        elseif localFallback then key=localFallback;special=nil
         else return nil end
     end
-    if not content and type(key)=='string' then local ok,value=pcall(function() return Content.fromUri(key) end);if ok then content=value end end
+    if key and meshCache[key] and meshCache[key].state=='failed' and localFallback and key~=localFallback then key=localFallback;content=nil;special=nil end
+    if not content and type(key)=='string' and not key:match('^local%-') then local ok,value=pcall(function() return Content.fromUri(key) end);if ok then content=value end end
     if not key then return nil end
     local entry=meshCache[key]
     if not entry and meshCount<256 then
         local id
         repeat id=meshRandom:NextInteger(3,16777215) until not usedMeshIds[id]
         usedMeshIds[id]=true;meshCount+=1
-        entry={id=id,key=key,content=content,state='queued',bodyPackage=cm~=nil}
+        entry={id=id,key=key,content=content,state='queued',bodyPackage=cm~=nil,localClassic=key==localFallback}
         meshCache[key]=entry;meshQueue[#meshQueue+1]=entry
     end
     return entry,special
@@ -332,7 +349,7 @@ task.spawn(function()
                 while active and e.state=='sending' and os.clock()<deadline do task.wait(.1) end
                 if e.state=='sending' then e.state='failed';e.vertices=nil;warn('[LumenGPU] Mesh upload interrupted; fallback') end
             else
-                local id=numericAsset(e.key)
+                local id=assetReference(e.key)
                 if id and active then
                     e.state='external';remote:FireServer('lumenusMesh',e.id,id)
                     local deadline=os.clock()+120
@@ -383,7 +400,10 @@ local function extraMaterial(obj,tex)
     local gen=obj:GetAttribute('LumenPBRStrength')
     if type(gen)~='number' or gen~=gen then gen=.35 end
     local spawn=obj:IsA('SpawnLocation') and not tex and 1 or 0
-    return {packed,n,r,m,tex and math.clamp(gen,0,1) or 0,spawn,0,0}
+    local metalMaterial=obj.Material==Enum.Material.Metal or obj.Material==Enum.Material.CorrodedMetal or obj.Material==Enum.Material.DiamondPlate or obj.Material==Enum.Material.Foil
+    local confidence=metalMaterial and 1 or ((obj.Material==Enum.Material.Glass or obj.Material==Enum.Material.Ice or obj.Material==Enum.Material.SmoothPlastic or obj.Material==Enum.Material.Marble) and .5 or .2)
+    if obj:GetAttribute('PathSpecular')~=nil or obj:GetAttribute('PathMetallic')~=nil or surface then confidence=-1 end
+    return {packed,n,r,m,tex and math.clamp(gen,0,1) or 0,spawn,0,confidence}
 end
 local extraScanned=setmetatable({},{__mode='k'})
 -- Classic garment atlas: torso=1, right limb=2, left limb=3.
@@ -440,7 +460,12 @@ local function materialPart(obj)
     local e,special=meshEntry(obj)
     if e and e.state=='ready' then
         shape=e.id
-        if special then
+        if e.localClassic then
+            if isHead then
+                local hm=obj:FindFirstChildOfClass('SpecialMesh')
+                if hm and hm.MeshType==Enum.MeshType.Head then c=c*CFrame.new(hm.Offset);size=e.size*hm.Scale else size=obj.Size end
+            else size=obj.Size end
+        elseif special then
             c=c*CFrame.new(special.Offset);size=e.size*special.Scale
         elseif obj:IsA('MeshPart') then
             local ok,ms=pcall(function() return obj.MeshSize end)
@@ -779,7 +804,7 @@ local emitterState={}
 local nearbyEmitters={}
 local particleRandom=Random.new()
 local function trackEmitter(o)
-    if o:IsA('ParticleEmitter') then emitterSet[o]=true end
+    if o:IsA('ParticleEmitter') or o:IsA('Fire') or o:IsA('Smoke') or o:IsA('Sparkles') then emitterSet[o]=true end
 end
 task.defer(function()
     for i,o in workspace:GetDescendants() do trackEmitter(o);if i%256==0 then task.wait() end end
@@ -829,6 +854,22 @@ local function rangeValue(r)
 end
 local lastEmitterScan=-100
 local particleRows={}
+local function legacyParticle(e)
+    if e:IsA('ParticleEmitter') then return e end
+    local fire=e:IsA('Fire');local smoke=e:IsA('Smoke')
+    local size=fire and math.clamp(e.Size*.6,.1,20) or smoke and math.clamp(e.Size*.55,.1,20) or .5
+    local col=fire and e.Color or smoke and e.Color or e.SparkleColor
+    local opacity=smoke and math.clamp(e.Opacity,0,1) or 1
+    return {
+      Enabled=e.Enabled,Parent=e.Parent,Texture=fire and 'local-fire_main.dds' or smoke and 'local-smoke_main.dds' or 'local-sparkles_main.dds',
+      Rate=fire and 18 or smoke and 10 or 12,Lifetime=NumberRange.new(fire and .6 or 1,fire and 1.3 or 2),
+      Speed=NumberRange.new(.5,fire and 3 or smoke and math.max(1,math.abs(e.RiseVelocity)) or 2),
+      EmissionDirection=Enum.NormalId.Top,SpreadAngle=Vector2.new(35,35),Rotation=NumberRange.new(-180,180),RotSpeed=NumberRange.new(-45,45),
+      Size=NumberSequence.new(size,size*(smoke and 1.8 or .5)),Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,1-opacity),NumberSequenceKeypoint.new(1,1)}),
+      Color=ColorSequence.new(col,fire and e.SecondaryColor or col),Acceleration=Vector3.new(0,fire and math.clamp(e.Heat,-20,20)*.1 or .4,0),
+      Drag=0,LockedToPart=false,VelocityInheritance=0,Brightness=fire and 2 or 1,LightEmission=smoke and 0 or .7
+    }
+end
 local function simulateParticles(dt)
     local cam=workspace.CurrentCamera
     if not cam or workspace:GetAttribute('LumenParticlesEnabled')==false then particleRows={};return end
@@ -840,6 +881,7 @@ local function simulateParticles(dt)
         if cf and e:IsDescendantOf(workspace) then
             local state=emitterState[e]
             if not state then state={credit=0,particles={},lastCF=cf};emitterState[e]=state end
+            e=legacyParticle(e)
             local list=state.particles
             for i=#list,1,-1 do
                 local p=list[i];p.age+=dt
@@ -1049,7 +1091,7 @@ task.spawn(function()
         if signature~=skyState.signature then
             skyState.signature=signature;skyState.entries={}
             for i,uri in uris do
-                local id=numericAsset(uri)
+                local id=assetReference(uri)
                 if id then
                     if not skyState.entries[id] then skyState.entries[id]={status='new',slot=0,next=0} end
                     print('[LumenGPU Sky] '..skyProps[i]..' -> '..id)
@@ -1066,7 +1108,7 @@ task.spawn(function()
         end
         local slots={0,0,0,0,0,0};local basis={0,0,0,0,0,0,0,0,0};local any=false
         for i,uri in uris do
-            local id=numericAsset(uri);local entry=id and skyState.entries[id]
+            local id=assetReference(uri);local entry=id and skyState.entries[id]
             if entry and entry.status=='ready' and entry.slot>0 then slots[i]=entry.slot;any=true end
         end
         if any then
@@ -1198,7 +1240,7 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
         remote:FireClient(player,'status','Waiting for HTTP')
     elseif cmd=='stop' and owner==player then owner=nil; latest=nil;pending=nil;closeWS()
     elseif cmd=='lumenusMesh' and owner==player then
-        if type(data)~='number' or data%1~=0 or data<3 or data>16777215 or type(avatar)~='string' or #avatar>20 or not avatar:match('^[1-9]%d*$') then return end
+        if type(data)~='number' or data%1~=0 or data<3 or data>16777215 or type(avatar)~='string' or #avatar>102 or not (avatar:match('^[1-9]%d*$') or avatar:match('^local%-[a-z0-9_%.%-]+$')) then return end
         local meshId,assetId=data,avatar
         task.spawn(function()
             local deadline=os.clock()+110
@@ -1215,7 +1257,7 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
             if owner==player then remote:FireClient(player,'lumenusMeshAck',meshId,result or false) end
         end)
     elseif cmd=='skyImage' and owner==player then
-        if type(data)~='string' or #data>20 or not data:match('^[1-9]%d*$') then return end
+        if type(data)~='string' or #data>102 or not (data:match('^[1-9]%d*$') or data:match('^local%-[a-z0-9_%.%-]+$')) then return end
         local asset=data
         task.spawn(function()
             local ok,res=pcall(function() return HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/lumenus',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode({kind='image',asset=asset,id=0})}) end)
@@ -1230,7 +1272,7 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
             remote:FireClient(player,'skyImageAck',asset,info or {status='retry',detail='bridge not reachable'})
         end)
     elseif cmd=='lumenusImage' and owner==player then
-        if type(data)~='string' or #data>20 or not data:match('^[1-9]%d*$') or type(avatar)~='number' or avatar%1~=0 or avatar<1 or avatar>128 then return end
+        if type(data)~='string' or #data>102 or not (data:match('^[1-9]%d*$') or data:match('^local%-[a-z0-9_%.%-]+$')) or type(avatar)~='number' or avatar%1~=0 or avatar<1 or avatar>128 then return end
         local asset=data
         task.spawn(function()
             local ok,res=pcall(function() return HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/lumenus',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode({kind='image',asset=asset,id=0})}) end)
@@ -1346,4 +1388,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.9.7 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.9.8 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')

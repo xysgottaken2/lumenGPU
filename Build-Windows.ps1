@@ -27,8 +27,8 @@ if (-not (Test-Path LumenBridge.exe)) {
     & go build -trimpath -ldflags '-s -w' -o LumenBridge.exe .
     CheckExit
 }
-New-Item -ItemType Directory -Force dist | Out-Null
-Copy-Item build\Release\LumenGPU.exe,build\Release\LumenDraco.exe,build\Release\trace.cso,build\Release\resolve.cso,build\Release\wavelet.cso,build\Release\estimateMotion.cso,build\Release\interpolateFrame.cso,LumenBridge.exe,Install_LumenGPU_0.2.lua,Launch.bat,Connect-Roblox.bat,Forget-Roblox.bat,README.txt -Destination dist -Force
+New-Item -ItemType Directory -Force dist,dist\textures,dist\meshes | Out-Null
+Copy-Item build\Release\LumenGPU.exe,build\Release\LumenDraco.exe,build\Release\trace.cso,build\Release\resolve.cso,build\Release\wavelet.cso,build\Release\estimateMotion.cso,build\Release\interpolateFrame.cso,LumenBridge.exe,Install_LumenGPU_0.2.lua,Launch.bat,Connect-Roblox.bat,Forget-Roblox.bat,README.txt,LOCAL-ASSETS.txt -Destination dist -Force
 Copy-Item build\_deps\draco-src\LICENSE -Destination dist\DRACO-LICENSE.txt -Force
 $notice = 'build\_deps\draco-src\NOTICE'; if (Test-Path $notice) { Copy-Item $notice -Destination dist\DRACO-NOTICE.txt -Force }
 Write-Host 'Native application built in dist. Run Launch.bat after reading README.txt.'

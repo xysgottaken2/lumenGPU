@@ -51,6 +51,9 @@ func newLumenus(b *Bridge, root string) (*Lumenus,error) {
 }
 func(l *Lumenus)close(){l.cancel();l.wg.Wait();os.RemoveAll(l.dir)}
 func assetKey(r assetRequest)(string,bool){
+ if validLocalAsset(r.Kind,r.Asset){
+  if r.Kind=="mesh"&&meshID(r.ID)||r.Kind=="image"&&r.ID<=textureMax{return r.Kind+":"+r.Asset,true};return "",false
+ }
  n,e:=strconv.ParseUint(r.Asset,10,64)
  if e!=nil||n==0||strconv.FormatUint(n,10)!=r.Asset{return "",false}
  if r.Kind=="mesh"&&meshID(r.ID){return r.Kind+":"+r.Asset,true}
@@ -108,8 +111,9 @@ func readLimited(r io.Reader,n int64)([]byte,error){
 }
 func cdnURL(u *url.URL)bool{return u!=nil&&u.Scheme=="https"&&u.User==nil&&u.Port()==""&&(u.Hostname()=="rbxcdn.com"||strings.HasSuffix(u.Hostname(),".rbxcdn.com"))}
 func(l *Lumenus)fetch(a assetRequest)([]byte,error){
+ if validLocalAsset(a.Kind,a.Asset){return l.fetchLocal(a)}
  // Explicit local imports remain available without an API key.
- ext:=[]string{".mesh"};if a.Kind=="image"{ext=[]string{".png",".jpg",".jpeg"}}
+ ext:=[]string{".mesh"};if a.Kind=="image"{ext=[]string{".png",".jpg",".jpeg",".dds"}}
  for _,suffix:=range ext {
   f,e:=os.Open(filepath.Join(l.imports,a.Asset+suffix));if e==nil{data,e:=readLimited(f,assetLimit);f.Close();return data,e};if !os.IsNotExist(e){return nil,fmt.Errorf("local import unreadable")}
  }

@@ -92,7 +92,7 @@ float3 applyClothes(Material m,uint primitive,uint shape,float3 lp,float2 bary,f
  }
  return c;
 }
-void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,float distance,inout float3 n,out float3 c,inout float rough,inout float metal){
+void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,float distance,inout float3 n,out float3 c,inout float rough,inout float metal,inout float spec){
  c=linearColor(m.colorMetal.xyz);float2 uv;
  float scale=max(.1,max(m.scaleSpec.x,max(m.scaleSpec.y,m.scaleSpec.z)));
  if(shape==0){uint face=primitive/2+1;scale=max(.1,face<=2?min(m.scaleSpec.z,m.scaleSpec.y):face<=4?min(m.scaleSpec.x,m.scaleSpec.z):min(m.scaleSpec.x,m.scaleSpec.y));}
@@ -129,6 +129,15 @@ void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,
  if(m.tex0.x>0){
   float4 tex=assetSampleLod(uint(m.tex0.x),uv,wrap,lod);float3 tc=linearColor(tex.rgb);
   c=lerp(c,m.tex0.y==0?c*tc:tc,saturate(tex.a*m.tex1.z));
+  if((visualFlags()&128u)!=0&&m.extra1.x>0&&m.extra1.w>=0&&m.extra0.w<=0&&m.tex0.y==0){
+   float strength=saturate(m.extra1.x*environment.x)*tex.a;
+   float chroma=max(tc.r,max(tc.g,tc.b))-min(tc.r,min(tc.g,tc.b));
+   float polished=saturate(luma(tc)*1.5-chroma*.45);
+   // Material-class prior: only known metal surfaces infer metallic variation.
+   if(m.extra1.w>.9)metal=lerp(metal,saturate(.55+.45*polished),strength);
+   float estimate=lerp(.35,1.,saturate(polished*.65+m.extra1.w*.45));
+   spec=lerp(spec,estimate,strength);
+  }
  }
  if(m.extra0.z>0)rough=clamp(assetSampleLod(uint(m.extra0.z),uv,wrap,lod).r,.025,1);
  if(m.extra0.w>0)metal=saturate(assetSampleLod(uint(m.extra0.w),uv,wrap,lod).r);
@@ -270,7 +279,7 @@ float3 path(float3 o,float3 d,inout uint seed,out float4 guide,out float4 alb){
   if(shape==3){uint at=uint(m.ay.w)+primitive*6;float3 sn=meshNormals[at+1]*(1-bary.x-bary.y)+meshNormals[at+2]*bary.x+meshNormals[at+3]*bary.y;sn/=max(m.scaleSpec.xyz,.0001);sn=normalize(m.ax.xyz*sn.x+m.ay.xyz*sn.y+m.az.xyz*sn.z);if(!entering)sn=-sn;if(dot(sn,orientedGN)>0&&dot(sn,wo)>.001)n=sn;}
   float3 p=o+d*q.CommittedRayT(),c;
   float metal=saturate(m.colorMetal.w),rough=clamp(m.roughEmit.x,.025,1),ior=clamp(m.roughEmit.w,1.001,3),spec=saturate(m.scaleSpec.w);
-  materialSurface(m,primitive,shape,localP,bary,q.CommittedRayT(),n,c,rough,metal);
+  materialSurface(m,primitive,shape,localP,bary,q.CommittedRayT(),n,c,rough,metal,spec);
   if(dot(n,orientedGN)<=0||dot(n,wo)<=.001)n=orientedGN;
   float trans=saturate(m.roughEmit.z)*(1-metal)*switches.z,opaque=1-trans;
   float prob=(spec>0||metal>0)?(.25+.65*metal)*switches.y:0;
