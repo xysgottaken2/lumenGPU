@@ -107,3 +107,6 @@ V0.9.9: standard Tool hotbar (1-9, 0), apostrophe/backquote inventory, arrow key
 
 
 V0.9.9b: equipped Tool descendants are marked in the existing clothing metadata spare field and retained in primary-ray first-person visibility; body and accessories still hidden. Tool records prioritized within 64 character parts. Actual world pose, no fake viewmodel. Primary direct lighting sums all unshadowed lights and deterministically traces the two strongest shadow-enabled lights per hit; additional shadowed lights omitted from primary direct contribution as a performance tradeoff, secondary bounces retain sampling. This reduces random direct-light selection flicker, not all GI or transport flicker. Reinstall Studio script and replace bridge, renderer and shader files. Runtime testing required.
+
+
+V0.9.9c Studio-only lighting tracker hotfix: active light Instances use strong keys with explicit descendant removal and periodic reconciliation. Weak references could disappear during garbage collection while the engine lights were still alive. Stable discovery IDs break equal-priority ties. No shader, protocol or binary changes; compatible with 0.9.9b. Stop Play, reinstall the script, and test a stationary light for 30 seconds. Runtime confirmation required.

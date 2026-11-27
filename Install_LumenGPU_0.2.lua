@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.9.9b)')
+print('[LumenGPU] Client starting (0.9.9c lighting tracker hotfix; compatible with 0.9.9b binaries)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -793,9 +793,15 @@ end)
 
 -- Static snapshots are built outside the camera Heartbeat and paced over frames.
 -- Capture the nearest 64 enabled Roblox lights as non-geometric records.
-local lightObjects=setmetatable({},{__mode='k'})
+-- Live Instances require strong references. A weak key can vanish while
+-- its engine Instance still exists, causing periodic lighting dropouts.
+local lightObjects={}
+local lightOrder=0
 local function trackLight(o)
-    if o:IsA('PointLight') or o:IsA('SpotLight') or o:IsA('SurfaceLight') then lightObjects[o]=true end
+    if (o:IsA('PointLight') or o:IsA('SpotLight') or o:IsA('SurfaceLight')) and not lightObjects[o] then
+        lightOrder+=1
+        lightObjects[o]=lightOrder
+    end
 end
 for _,o in workspace:GetDescendants() do trackLight(o) end
 workspace.DescendantAdded:Connect(trackLight)
@@ -806,13 +812,17 @@ local lastLightWarning=-100
 local lastLightCount=-1
 local function lightRows()
     local cam=workspace.CurrentCamera;if not cam then return {} end
-    if os.clock()-lastLightScan>2 then
+    if os.clock()-lastLightScan>5 then
         lastLightScan=os.clock()
+        -- Reconcile, but never drop live references between scans.
+        for o in lightObjects do
+            if not o:IsDescendantOf(workspace) then lightObjects[o]=nil end
+        end
         for _,o in workspace:GetDescendants() do trackLight(o) end
     end
     local candidates={}
     local char=player.Character
-    for o in lightObjects do
+    for o,orderID in lightObjects do
         local ok,result=pcall(function()
             if not o.Parent or not o:IsDescendantOf(workspace) or not o.Enabled or o.Range<=0 or o.Brightness<=0 then return nil end
             local parent=o.Parent
@@ -829,12 +839,12 @@ local function lightRows()
             local held=char and o:IsDescendantOf(char) or o:IsDescendantOf(cam)
             local distance=(pos-cam.CFrame.Position).Magnitude
             local priority=held and -100000+distance or math.max(0,distance-o.Range)
-            return {d=priority,row={p=vec(pos),r=vec(basis.RightVector),u=vec(basis.UpVector),b=vec(dir),s={math.clamp(o.Range,.01,100000),1,1},c={col.R,col.G,col.B},emit=math.clamp(o.Brightness,0,50),emissionColor={col.R,col.G,col.B},shape=0,extra={0,0,0,0,0,o.Shadows and 1 or 0,kind,math.clamp(cone,-1,1)},metal=0,rough=1,specular=0,transmission=0,ior=1.5}}
+            return {d=priority,id=orderID,row={p=vec(pos),r=vec(basis.RightVector),u=vec(basis.UpVector),b=vec(dir),s={math.clamp(o.Range,.01,100000),1,1},c={col.R,col.G,col.B},emit=math.clamp(o.Brightness,0,50),emissionColor={col.R,col.G,col.B},shape=0,extra={0,0,0,0,0,o.Shadows and 1 or 0,kind,math.clamp(cone,-1,1)},metal=0,rough=1,specular=0,transmission=0,ior=1.5}}
         end)
         if ok and result then candidates[#candidates+1]=result
         elseif not ok and os.clock()-lastLightWarning>3 then lastLightWarning=os.clock();warn('[LumenGPU Lights] '..tostring(result)) end
     end
-    table.sort(candidates,function(a,b) return a.d<b.d end)
+    table.sort(candidates,function(a,b) if a.d==b.d then return a.id<b.id end;return a.d<b.d end)
     local rows={}
     for k=1,math.min(#candidates,64) do rows[k]=candidates[k].row end
     if #rows~=lastLightCount then lastLightCount=#rows;print('[LumenGPU Lights] active '..#rows..' / '..#candidates) end
