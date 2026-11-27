@@ -12,6 +12,7 @@ func localCandidates(root,appdata,kind,asset string)[]string{
  if !validLocalAsset(kind,asset){return nil}
  name:=strings.TrimPrefix(asset,"local-");folder:="textures";if kind=="mesh"{folder="meshes"}
  paths:=[]string{filepath.Join(root,folder,name)}
+ if kind=="image"&&strings.HasPrefix(name,"mtrl_"){paths=append(paths,filepath.Join(root,"materials",name),filepath.Join(root,"textures","TerrainTools",name))}
  if appdata==""{return paths}
  versions:=filepath.Join(appdata,"Roblox","Versions")
  dirs,_:=os.ReadDir(versions)
@@ -21,6 +22,7 @@ func localCandidates(root,appdata,kind,asset string)[]string{
    paths=append(paths,filepath.Join(base,"avatar","meshes",name),filepath.Join(base,"avatar","heads",name))
   }else{
    paths=append(paths,filepath.Join(base,"textures",name),filepath.Join(base,"textures","particles",name),filepath.Join(base,"particles",name))
+   if strings.HasPrefix(name,"mtrl_"){paths=append(paths,filepath.Join(base,"textures","TerrainTools",name),filepath.Join(base,"studio","textures","TerrainTools",name),filepath.Join(base,"TerrainTools",name))}
   }
  }
  return paths

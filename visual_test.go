@@ -26,6 +26,12 @@ func TestToolVisibilityWire(t *testing.T){
  p.Cloth[7]=2;if validCloth(p.Cloth){t.Fatal("invalid tool marker")}
 }
 
+func TestBuiltinMaterialProjection(t *testing.T){
+ a:=[8]float64{1,7,.25,.25,0,0,1,1}
+ if !validTexture(a){t.Fatal("valid material projection rejected")}
+ a[1]=8;if validTexture(a){t.Fatal("unknown projection accepted")}
+}
+
 func TestParticleMetadata(t *testing.T){
  a:=[8]float64{0,0,0,0,.5,0,4,.75}
  if !validExtra(a){t.Fatal("valid particle rejected")};a[7]=-.1;if validExtra(a){t.Fatal("negative opacity accepted")};a[7]=1;a[6]=5;if validExtra(a){t.Fatal("unknown marker accepted")}

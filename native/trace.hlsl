@@ -40,7 +40,7 @@ float2 faceUV(uint face,float3 p){
  return float2(-p.x,-p.y)+.5;
 }
 bool materialUV(Material m,uint primitive,float3 p,float2 bary,out float2 uv){
- uv=0;uint mode=uint(m.tex0.y);
+ uv=0;uint mode=uint(m.tex0.y);if(mode==7)return false;
  if(mode==0){
   if(m.az.w<=0)return false;uint at=uint(m.az.w)+primitive*3;uv=meshNormals[at].xy*(1-bary.x-bary.y)+meshNormals[at+1].xy*bary.x+meshNormals[at+2].xy*bary.y;
  }else{
@@ -92,7 +92,7 @@ float3 applyClothes(Material m,uint primitive,uint shape,float3 lp,float2 bary,f
  }
  return c;
 }
-void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,float distance,inout float3 n,out float3 c,inout float rough,inout float metal,inout float spec){
+void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,float distance,float3 worldP,inout float3 n,out float3 c,inout float rough,inout float metal,inout float spec){
  c=linearColor(m.colorMetal.xyz);float2 uv;
  float scale=max(.1,max(m.scaleSpec.x,max(m.scaleSpec.y,m.scaleSpec.z)));
  if(shape==0){uint face=primitive/2+1;scale=max(.1,face<=2?min(m.scaleSpec.z,m.scaleSpec.y):face<=4?min(m.scaleSpec.x,m.scaleSpec.z):min(m.scaleSpec.x,m.scaleSpec.y));}
@@ -124,12 +124,19 @@ void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,
    c=lerp(c,float3(.055,.055,.055),mark*.85);
   }
  }
+ if(m.tex0.y==7){
+  float3 an=abs(n);float rate=max(.015625,m.tex0.z);
+  if(an.x>=an.y&&an.x>=an.z){uv=worldP.zy*float2(n.x>=0?-1:1,-1)*rate;t=float3(0,0,n.x>=0?-1:1);b=float3(0,-1,0);}
+  else if(an.y>=an.z){uv=worldP.xz*float2(1,n.y>=0?1:-1)*rate;t=float3(1,0,0);b=float3(0,0,n.y>=0?1:-1);}
+  else{uv=worldP.xy*float2(n.z>=0?1:-1,-1)*rate;t=float3(n.z>=0?1:-1,0,0);b=float3(0,-1,0);}
+  hasUV=true;lod=right.w<0?0:clamp(log2(max(1.,distance*2*eye.w*256*rate/dims.y)),0.,8.);
+ }
  if(!hasUV){c=applyClothes(m,primitive,shape,lp,bary,c,lod);return;}
  bool wrap=m.tex1.w>0;
  if(m.tex0.x>0){
   float4 tex=assetSampleLod(uint(m.tex0.x),uv,wrap,lod);float3 tc=linearColor(tex.rgb);
-  c=lerp(c,m.tex0.y==0?c*tc:tc,saturate(tex.a*m.tex1.z));
-  if((visualFlags()&128u)!=0&&m.extra1.x>0&&m.extra1.w>=0&&m.extra0.w<=0&&m.tex0.y==0){
+  c=lerp(c,(m.tex0.y==0||m.tex0.y==7)?c*tc:tc,saturate(tex.a*m.tex1.z));
+  if((visualFlags()&128u)!=0&&m.extra1.x>0&&m.extra1.w>=0&&m.extra0.w<=0&&(m.tex0.y==0||m.tex0.y==7)){
    float strength=saturate(m.extra1.x*environment.x)*tex.a;
    float chroma=max(tc.r,max(tc.g,tc.b))-min(tc.r,min(tc.g,tc.b));
    float polished=saturate(luma(tc)*1.5-chroma*.45);
@@ -150,7 +157,10 @@ void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,
   float hx=luma(assetSampleLod(off,uv+float2(stepUV,0),wrap,lod).rgb)-h;
   float hy=luma(assetSampleLod(off,uv+float2(0,stepUV),wrap,lod).rgb)-h;
   n=bumpNormal(n,t,b,-float2(hx,hy)*m.extra1.x*3*max(0.,abs(right.w)-(right.w<0?.001:0)));
-  if(m.extra0.z<=0)rough=clamp(lerp(rough, .3+.6*(1-h),saturate(m.extra1.x*up.w)),.025,1);
+ }
+ if(m.extra0.z<=0&&(visualFlags()&128u)!=0&&m.extra1.x>0&&m.tex0.x>0){
+  float h=luma(assetSampleLod(uint(m.tex0.x),uv,wrap,lod).rgb);
+  rough=clamp(lerp(rough,.3+.6*(1-h),saturate(m.extra1.x*up.w)),.025,1);
  }
  c=applyClothes(m,primitive,shape,lp,bary,c,lod);
 }
@@ -301,7 +311,7 @@ float3 path(float3 o,float3 d,inout uint seed,out float4 guide,out float4 alb){
   if(shape==3){uint at=uint(m.ay.w)+primitive*6;float3 sn=meshNormals[at+1]*(1-bary.x-bary.y)+meshNormals[at+2]*bary.x+meshNormals[at+3]*bary.y;sn/=max(m.scaleSpec.xyz,.0001);sn=normalize(m.ax.xyz*sn.x+m.ay.xyz*sn.y+m.az.xyz*sn.z);if(!entering)sn=-sn;if(dot(sn,orientedGN)>0&&dot(sn,wo)>.001)n=sn;}
   float3 p=o+d*q.CommittedRayT(),c;
   float metal=saturate(m.colorMetal.w),rough=clamp(m.roughEmit.x,.025,1),ior=clamp(m.roughEmit.w,1.001,3),spec=saturate(m.scaleSpec.w);
-  materialSurface(m,primitive,shape,localP,bary,q.CommittedRayT(),n,c,rough,metal,spec);
+  materialSurface(m,primitive,shape,localP,bary,q.CommittedRayT(),p,n,c,rough,metal,spec);
   if(dot(n,orientedGN)<=0||dot(n,wo)<=.001)n=orientedGN;
   float trans=saturate(m.roughEmit.z)*(1-metal)*switches.z,opaque=1-trans;
   float prob=(spec>0||metal>0)?(.25+.65*metal)*switches.y:0;

@@ -23,7 +23,7 @@ func validUV(v UV)bool{return finite(v[0])&&finite(v[1])&&math.Abs(v[0])<=4096&&
 func validTexture(t [8]float64)bool{
  for _,x:=range t{if !finite(x){return false}}
  if t[0]==0{return t==[8]float64{}}
- return t[0]>=1&&t[0]<=textureMax&&t[0]==math.Trunc(t[0])&&t[1]>=0&&t[1]<=6&&t[1]==math.Trunc(t[1])&&t[2]>0&&t[2]<=4096&&t[3]>0&&t[3]<=4096&&math.Abs(t[4])<=4096&&math.Abs(t[5])<=4096&&t[6]>=0&&t[6]<=1&&(t[7]==0||t[7]==1)
+ return t[0]>=1&&t[0]<=textureMax&&t[0]==math.Trunc(t[0])&&t[1]>=0&&t[1]<=7&&t[1]==math.Trunc(t[1])&&t[2]>0&&t[2]<=4096&&t[3]>0&&t[3]<=4096&&math.Abs(t[4])<=4096&&math.Abs(t[5])<=4096&&t[6]>=0&&t[6]<=1&&(t[7]==0||t[7]==1)
 }
 func decodeTexture(data []byte)([]uint32,error){return decodeTextureBudget(data,texturePixelBudget,0)}
 func decodeTextureBudget(data []byte,used,slots int)([]uint32,error){
@@ -36,6 +36,14 @@ func decodeTextureBudget(data []byte,used,slots int)([]uint32,error){
  for y:=0;y<side;y++{for x:=0;x<side;x++{
   sx:=b.Min.X+(2*x+1)*b.Dx()/(2*side);sy:=b.Min.Y+(2*y+1)*b.Dy()/(2*side)
   c:=color.NRGBAModel.Convert(im.At(sx,sy)).(color.NRGBA)
+  if b.Dx()<side&&b.Dy()<side{
+   fx:=(float64(x)+.5)*float64(b.Dx())/float64(side)-.5;fy:=(float64(y)+.5)*float64(b.Dy())/float64(side)-.5
+   ix,iy:=int(math.Floor(fx)),int(math.Floor(fy));tx,ty:=fx-float64(ix),fy-float64(iy)
+   get:=func(x,y int)color.NRGBA{if x<0{x=0};if x>=b.Dx(){x=b.Dx()-1};if y<0{y=0};if y>=b.Dy(){y=b.Dy()-1};return color.NRGBAModel.Convert(im.At(b.Min.X+x,b.Min.Y+y)).(color.NRGBA)}
+   a,z,d,q:=get(ix,iy),get(ix+1,iy),get(ix,iy+1),get(ix+1,iy+1)
+   blend:=func(a,b,c,d uint8)uint8{return uint8(math.Round((float64(a)*(1-tx)+float64(b)*tx)*(1-ty)+(float64(c)*(1-tx)+float64(d)*tx)*ty))}
+   c=color.NRGBA{blend(a.R,z.R,d.R,q.R),blend(a.G,z.G,d.G,q.G),blend(a.B,z.B,d.B,q.B),blend(a.A,z.A,d.A,q.A)}
+  }
   out[y*side+x]=uint32(c.R)|uint32(c.G)<<8|uint32(c.B)<<16|uint32(c.A)<<24
  }}
  return out,nil

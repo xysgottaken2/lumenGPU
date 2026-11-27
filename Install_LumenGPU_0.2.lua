@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.9.9c lighting tracker hotfix; compatible with 0.9.9b binaries)')
+print('[LumenGPU] Client starting (0.10.0)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -238,6 +238,8 @@ local meshReadyVersion=0
 local meshCount=0
 local externalImages={}
 local imageCount=0
+local materialImageCount=0
+local failedImages={}
 local imageQueue={}
 local resolvedImages={}
 local imageScanned=setmetatable({},{__mode='k'})
@@ -261,12 +263,106 @@ local function assetReference(uri)
     end
     return nil
 end
-local function discoverImage(uri)
+local function discoverImage(uri,builtin)
     local id=assetReference(uri)
-    if id and not externalImages[id] and imageCount<128 then
-        imageCount+=1;externalImages[id]=imageCount;imageQueue[#imageQueue+1]={asset=id,slot=imageCount}
+    if id and not externalImages[id] and not failedImages[id] and imageCount<128 and (not builtin or materialImageCount<72) then
+        imageCount+=1;if builtin then materialImageCount+=1 end
+        externalImages[id]=imageCount;imageQueue[#imageQueue+1]={asset=id,slot=imageCount}
     end
     return id and resolvedImages[id] or 0
+end
+-- Public map identifiers: https://create.roblox.com/docs/parts/materials
+-- Current base maps, not exact built-in shader recreation.
+local builtinMaps={
+    Asphalt={'9930003046','9429449876','9429450346'},
+    Basalt={'9920482056','9438412214','9438412457'},
+    Brick={'9920482813','9438453152','9438453413'},
+    Cardboard={'14108651729','14108654002','14108654299'},
+    Carpet={'14108662587','14108663154','14108663726'},
+    CeramicTiles={'17429425079','17429425915','17429426861','17429426100'},
+    ClayRoofTiles={'18147681935','18147683410','18147684855'},
+    Cobblestone={'9919718991','9438457162','9438457470'},
+    Concrete={'9920484153','9466554006','9466554186'},
+    CorrodedMetal={'9920589327','9439548484','9439556441','9439548749'},
+    CrackedLava={'9920484943','9438508790','9438509046'},
+    DiamondPlate={'10237720195','9438583222','9438583558','9438583347'},
+    Fabric={'9920517696','9873280412','9873282563'},
+    Foil={'9466552117','9424786192','9424786620','9424786272'},
+    Glacier={'9920518732','9438812958','9438851286'},
+    Glass={'9438868521','7547304785','7547304892'},
+    Granite={'9920550238','9438882935','9438883109'},
+    Grass={'9920551868','9438955773','9438955997'},
+    Ground={'9920554482','9439043558','9439043765'},
+    Ice={'9920555943','9467301039','9467301203'},
+    LeafyGrass={'9920557906','9439080781','9439080950'},
+    Leather={'14108670073','14108670486','14108670748'},
+    Limestone={'9920561437','9439415191','9439415495'},
+    Marble={'9439430596','9439431240','9439431383'},
+    Metal={'9920574687','9873295432','9873318890','9873318201'},
+    Mud={'9920578473','9439509827','9439510012'},
+    Pavement={'9920579943','9439519281','9439519532'},
+    Pebble={'9920581082','9439528644','9439537267'},
+    Plaster={'14108671255','14108671870','14108672378'},
+    Rock={'9920587470','9439538417','9439545859'},
+    RoofShingles={'119722544879522','77534750680073','129397260312247'},
+    Rubber={'14108673018','14108674698','14108675142','14108674894'},
+    Salt={'9920590225','9439565809','9439566688'},
+    Sand={'9920591683','9439577084','9439577327'},
+    Sandstone={'9920596120','9439596530','9439596711'},
+    Slate={'9920599782','9439612514','9439612733'},
+    Snow={'9920620284','9439632006','9439632145'},
+    Wood={'9920625290','9439641376','9439648605'},
+    WoodPlanks={'9920626778','9439650689','9439658127'},
+}
+local previewMaterials={Asphalt=true,Basalt=true,Brick=true,Cobblestone=true,Concrete=true,CrackedLava=true,Glacier=true,Grass=true,Ground=true,Ice=true,LeafyGrass=true,Limestone=true,Mud=true,Pavement=true,Rock=true,Salt=true,Sand=true,Sandstone=true,Slate=true,Snow=true,WoodPlanks=true}
+local materialService=game:GetService('MaterialService')
+local function modernMaterials()
+    local override=workspace:GetAttribute('LumenUse2022Materials')
+    if type(override)=='boolean' then return override end
+    local ok,value=pcall(function() return materialService.Use2022Materials end)
+    return not ok or value
+end
+local function builtinTexture(mat)
+    if workspace:GetAttribute('LumenBuiltinMaterials')==false then return nil end
+    local name=mat.Name;local ids=builtinMaps[name];if not ids then return nil end
+    local modern=modernMaterials()
+    local base='local-mtrl_'..string.lower(name)
+    local localID=base..(modern and '_2022.png' or '.png')
+    local altID=base..(modern and '.png' or '_2022.png')
+    local color,n,r,m=0,0,0,0
+    local official=false
+    -- Classic previews are preferred for classic places. Modern maps are
+    -- requested first in modern places; fallback only after confirmed failure.
+    if modern or not previewMaterials[name] then
+        color=discoverImage(ids[1],true);official=color>0
+        if color==0 and failedImages[ids[1]] and previewMaterials[name] then
+            color=discoverImage(localID,true)
+            if color==0 and failedImages[localID] then color=discoverImage(altID,true) end
+        end
+    else
+        color=discoverImage(localID,true)
+        if color==0 and failedImages[localID] then
+            color=discoverImage(ids[1],true);official=color>0
+            if color==0 and failedImages[ids[1]] then color=discoverImage(altID,true) end
+        end
+    end
+    if color==0 then return nil end
+    if official then
+        n=discoverImage(ids[2],true);r=discoverImage(ids[3],true)
+        if ids[4] then m=discoverImage(ids[4],true) end
+    end
+    local tile=workspace:GetAttribute('LumenMaterialStudsPerTile')
+    tile=type(tile)=='number' and tile==tile and math.clamp(tile,.25,64) or 4
+    local metalClass=(name=='Metal' or name=='CorrodedMetal' or name=='DiamondPlate' or name=='Foil')
+    return {color,7,1/tile,1/tile,0,0,1,1},n,r,m,metalClass and 1 or .2
+end
+local function canUseBuiltin(obj)
+    if obj:FindFirstChildOfClass('SurfaceAppearance') then return false end
+    if obj:IsA('MeshPart') and obj.TextureID~='' then return false end
+    local special=obj:FindFirstChildOfClass('SpecialMesh')
+    if special and special.TextureId~='' then return false end
+    for _,child in obj:GetChildren() do if child:IsA('Decal') or child:IsA('Texture') then return false end end
+    return not obj:FindFirstAncestorOfClass('Tool') and not (obj.Parent and obj.Parent:FindFirstChildOfClass('Humanoid'))
 end
 local faceCode={[Enum.NormalId.Right]=1,[Enum.NormalId.Left]=2,[Enum.NormalId.Top]=3,[Enum.NormalId.Bottom]=4,[Enum.NormalId.Back]=5,[Enum.NormalId.Front]=6}
 local bodyNames={Head='Head',Torso='Torso',LeftArm='Left Arm',RightArm='Right Arm',LeftLeg='Left Leg',RightLeg='Right Leg'}
@@ -318,7 +414,10 @@ local function discoverImages(obj)
     return nil
 end
 remote.OnClientEvent:Connect(function(kind,id,slot)
-    if kind=='lumenusImageAck' and type(slot)=='number' and slot>0 then resolvedImages[id]=slot;imageScanned=setmetatable({},{__mode='k'});meshReadyVersion+=1 end
+    if kind=='lumenusImageAck' then
+        if type(slot)=='number' and slot>0 then resolvedImages[id]=slot;imageScanned=setmetatable({},{__mode='k'});meshReadyVersion+=1
+        elseif slot==false then failedImages[id]=true;meshReadyVersion+=1 end
+    end
 end)
 task.spawn(function()
     while task.wait(.5) do
@@ -544,6 +643,13 @@ local function materialPart(obj)
     local tex=imageScanned[obj];if tex==nil then tex=discoverImages(obj) or false;imageScanned[obj]=tex end
     local cached=extraScanned[obj];local ex
     if cached and cached.rev==meshReadyVersion and cached.tex==tex and os.clock()-cached.at<3 then ex=cached.ex else ex=extraMaterial(obj,tex);extraScanned[obj]={rev=meshReadyVersion,tex=tex,ex=ex,at=os.clock()} end
+    if not tex and canUseBuiltin(obj) then
+        local bt,n,r,m,confidence=builtinTexture(mat)
+        if bt then
+            tex=bt;ex=table.clone(ex);ex[2]=n;ex[3]=r;ex[4]=m;ex[5]=num('LumenPBRStrength',.35,0,1)
+            ex[8]=(obj:GetAttribute('PathSpecular')~=nil or obj:GetAttribute('PathMetallic')~=nil) and -1 or confidence
+        end
+    end
     local e,special=meshEntry(obj)
     if e and e.state=='ready' then
         shape=e.id
@@ -755,7 +861,7 @@ local function terrainChunk(origin)
             local entry={id=id,key='terrain:'..id,vertices=verts,size=Vector3.new(side,side,side),state='queued',terrain=true}
             meshCache[entry.key]=entry;meshQueue[#meshQueue+1]=entry
             local color=terrain:GetMaterialColor(mat)
-            terrainRows[#terrainRows+1]={entry=entry,part={p=vec(origin+Vector3.new(32,32,32)),r={1,0,0},u={0,1,0},b={0,0,1},s={side,side,side},c={color.R,color.G,color.B},metal=0,rough=.85,emit=0,transmission=0,ior=1.5,shape=id,specular=.3,emissionColor={0,0,0}}}
+            terrainRows[#terrainRows+1]={entry=entry,material=mat,part={p=vec(origin+Vector3.new(32,32,32)),r={1,0,0},u={0,1,0},b={0,0,1},s={side,side,side},c={color.R,color.G,color.B},metal=0,rough=.85,emit=0,transmission=0,ior=1.5,shape=id,specular=.3,emissionColor={0,0,0}}}
         end
     end
 end
@@ -884,7 +990,14 @@ local function refreshWorld()
     -- Preserve entries added during this build.
     for _,obj in order do if tracked[obj] and not seen[obj] then seen[obj]=true;compact[#compact+1]=obj;dirty=true end end
     order=compact
-    for _,row in terrainRows do if row.entry.state=='ready' and #static<15360 then static[#static+1]=row.part end end
+    for _,row in terrainRows do
+        if row.entry.state=='ready' and #static<15360 then
+            local part=table.clone(row.part)
+            local tex,n,r,m,confidence=builtinTexture(row.material)
+            if tex then part.tex=tex;part.extra={0,n,r,m,.35,0,0,confidence} end
+            static[#static+1]=part
+        end
+    end
     local encoded=HTTP:JSONEncode(static)
     if encoded~=lastWorldJSON then
         serial+=1;local id=serial
@@ -1441,11 +1554,20 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
         if type(data)~='string' or #data>102 or not (data:match('^[1-9]%d*$') or data:match('^local%-[a-z0-9_%.%-]+$')) or type(avatar)~='number' or avatar%1~=0 or avatar<1 or avatar>128 then return end
         local asset=data
         task.spawn(function()
-            local ok,res=pcall(function() return HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/lumenus',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode({kind='image',asset=asset,id=0})}) end)
-            if ok and res.Success and owner==player then
-                local good,info=pcall(function() return HTTP:JSONDecode(res.Body) end)
-                if good and info.slot then remote:FireClient(player,'lumenusImageAck',asset,info.slot) end
-            end
+            local deadline=os.clock()+150
+            repeat
+                local ok,res=pcall(function() return HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/lumenus',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode({kind='image',asset=asset,id=0})}) end)
+                if ok and res.Success then
+                    local good,info=pcall(function() return HTTP:JSONDecode(res.Body) end)
+                    if good and type(info)=='table' then
+                        if info.status=='ready' and type(info.slot)=='number' then
+                            if owner==player then remote:FireClient(player,'lumenusImageAck',asset,info.slot) end;return
+                        elseif info.status=='failed' then break end
+                    end
+                end
+                task.wait(2)
+            until owner~=player or os.clock()>deadline
+            if owner==player then remote:FireClient(player,'lumenusImageAck',asset,false) end
         end)
     elseif cmd=='meshBegin' and owner==player then
         if type(data)=='number' and data%1==0 and data>=3 and data<=16777215 and type(avatar)=='number' and avatar%3==0 and avatar>=3 and avatar<=60000 then pendingMesh={id=data,count=avatar,rows={}} end
@@ -1557,4 +1679,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.9.9b Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.10.0 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')
