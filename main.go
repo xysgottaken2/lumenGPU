@@ -54,6 +54,8 @@ type Environment struct {
  Brightness float64 `json:"brightness"`
  Celestial bool `json:"celestial"`
  FirstPerson bool `json:"firstPerson"`
+ SkySlots [6]uint32 `json:"skySlots"`
+ SkyBasis [9]float64 `json:"skyBasis"`
 }
 type Update struct {
  HUD *[]HUDItem `json:"hud,omitempty"`
@@ -113,6 +115,7 @@ func valid(u Update) bool { return updateError(u)=="" }
 func validShape(x float64) bool {return !math.IsNaN(x)&&!math.IsInf(x,0)&&x>=-6&&x<=16777215&&x==math.Trunc(x)}
 func updateError(u Update) string {
  if e:=u.Environment;e!=nil&&(!finite(e.Clock)||e.Clock<0||e.Clock>24||!finite(e.SunSize)||e.SunSize<0||e.SunSize>180||!finite(e.Brightness)||e.Brightness<0||e.Brightness>100){return "invalid environment"}
+ if u.Environment!=nil&&!validSky(*u.Environment){return "invalid skybox metadata"}
  if u.HUD!=nil&&!validHUD(*u.HUD){return "invalid HUD"}
  c:=u.Camera
  if !vec(c.P)||!axis(c.R)||!axis(c.U)||!axis(c.F)||!finite(c.Fov)||c.Fov<5||c.Fov>120{return "invalid camera"}
@@ -163,6 +166,8 @@ func (b *Bridge) handler() http.Handler {
  mux.HandleFunc("/api/ws",b.stream)
  mux.HandleFunc("/api/native-hud-ws",b.hudStream)
  mux.HandleFunc("/api/geometry-ws",b.geometryStream)
+ mux.HandleFunc("/api/pose-ws",b.poseStream)
+ mux.HandleFunc("/api/pose-update",b.poseHTTP)
  mux.HandleFunc("/api/native-camera-ws",func(w http.ResponseWriter,r *http.Request){b.nativeStream(w,r,false)})
  mux.HandleFunc("/api/native-geometry-ws",func(w http.ResponseWriter,r *http.Request){b.nativeStream(w,r,true)})
  mux.HandleFunc("/api/native-input-ws",b.inputStream)
@@ -248,7 +253,7 @@ func main() {
  b.lumenus=worker
  defer worker.close()
  if len(os.Args)>1&&os.Args[1]=="--connect" {ctx,cancel:=signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM);session,e:=configureOAuth(ctx);cancel();if e!=nil{log.Printf("[Lumenus] Authorization failed: %v; continuing with local imports/API key",e)}else{worker.oauth=session;log.Println("[Lumenus] Roblox authorization successful (session only)")}}else if worker.key==""{log.Println("[Lumenus] Local-only mode. Run Connect-Roblox.bat for Roblox account authorization.")}
- fmt.Println("LUMEN GPU 0.9.5 | Lumenus session cache:",worker.dir)
+ fmt.Println("LUMEN GPU 0.9.6 | Lumenus session cache:",worker.dir)
  fmt.Println("Native bridge at http://" + addr + " | Ctrl+C to stop")
  s := http.Server{Handler: b.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
  ctx,stop:=signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM);defer stop()

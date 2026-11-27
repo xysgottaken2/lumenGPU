@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iterator>
 int main(int argc,char** argv){
+ {std::vector<unsigned char> b(168);memcpy(b.data(),"LGR7",4);uint32_t flag=1,slot=6;memcpy(b.data()+104,&flag,4);memcpy(b.data()+128,&slot,4);float identity=1;memcpy(b.data()+132,&identity,4);auto s=parse(b);assert(s.firstPerson&&s.skySlots[5]==6&&s.skyBasis[0]==1);}
  {std::vector<unsigned char> b(88+208);memcpy(b.data(),"LGC4",4);uint32_t n=1;memcpy(b.data()+20,&n,4);float k=7;memcpy(b.data()+264,&k,4);assert(parse(b).parts[0].cloth[0]==7);}
  {std::vector<unsigned char> b(88+176);memcpy(b.data(),"LGP4",4);uint32_t n=1;memcpy(b.data()+20,&n,4);float k=4095;memcpy(b.data()+232,&k,4);assert(parse(b).parts[0].extra[0]==4095);}
  {std::vector<unsigned char> b(8+3*32);memcpy(b.data(),"LGM3",4);uint32_t n=3;memcpy(b.data()+4,&n,4);float normal=1;memcpy(b.data()+8+60+8,&normal,4);assert(parseMeshData(b).normals[0].z==1);}

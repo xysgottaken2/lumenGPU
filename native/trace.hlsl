@@ -149,6 +149,25 @@ float daylight(){return smoothstep(-.16,.12,sun.y);}
 float sunPower(){return smoothstep(-.035,.08,sun.y)*quality.z*environment.z;}
 float3 sunTint(){return lerp(float3(1,.28,.065),float3(1,.93,.8),smoothstep(0,.35,sun.y));}
 float3 sky(float3 d){
+ uint start=visualFlags()>>9;
+ if(start>0){
+  Material env=mats[start-1];
+  if(env.roughEmit.z>0){
+   float3 q=float3(dot(d,env.ax.xyz),dot(d,env.ay.xyz),dot(d,env.az.xyz));float3 a=abs(q);
+   float slot;float2 uv;
+   if(a.x>=a.y&&a.x>=a.z){
+    slot=q.x>=0?env.colorMetal.x:env.colorMetal.y;
+    uv=float2(q.x>=0?-q.z:q.z,-q.y)/max(a.x,1e-6);
+   }else if(a.y>=a.z){
+    slot=q.y>=0?env.colorMetal.z:env.colorMetal.w;
+    uv=float2(-q.z,q.y>=0?q.x:-q.x)/max(a.y,1e-6);
+   }else{
+    slot=q.z>=0?env.roughEmit.x:env.roughEmit.y;
+    uv=float2(q.z>=0?q.x:-q.x,-q.y)/max(a.z,1e-6);
+   }
+   if(slot>0)return linearColor(assetSample(uint(slot),uv*.5+.5,false).rgb)*quality.y;
+  }
+ }
  float elev=saturate(d.y),day=daylight();
  float twilight=exp(-pow((sun.y+.025)*8,2));
  float toward=pow(saturate(dot(normalize(float3(d.x,.001,d.z)),normalize(float3(sun.x,.001,sun.z)))),5);

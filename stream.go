@@ -72,16 +72,15 @@ func(b *Bridge)splitState(channel int)(State,uint64){
 func(b *Bridge)nativeSplitStream(w http.ResponseWriter,r *http.Request,channel int){
  c,err:=localUpgrade.Upgrade(w,r,nil);if err!=nil{return};defer c.Close()
  tick:=time.NewTicker(4*time.Millisecond);defer tick.Stop()
- last:=^uint64(0);lastSend:=time.Time{}
+ last:=^uint64(0);lastPose:=^uint64(0);lastSend:=time.Time{}
  for range tick.C{
   s,rev:=b.splitState(channel)
-  if rev==last&&time.Since(lastSend)<250*time.Millisecond{continue}
-  // First/change packet contains full channel snapshot. Unchanged heartbeat is empty.
-  // The native receiver ignores repeated revision keys.
-  if rev==last{s.Parts=nil}
+  poseChanged:=channel==0&&s.Scene!=lastPose
+  if rev==last&&!poseChanged&&time.Since(lastSend)<250*time.Millisecond{continue}
+  if channel==0 {if !poseChanged{s.Parts=nil}}else if rev==last{s.Parts=nil}
   c.SetWriteDeadline(time.Now().Add(time.Second))
   packet:=nativePacket(s);if channel==0{packet=nativeEnvironmentPacket(s)}
   if c.WriteMessage(websocket.BinaryMessage,packet)!=nil{return}
-  last=rev;lastSend=time.Now()
+  last=rev;lastPose=s.Scene;lastSend=time.Now()
  }
 }

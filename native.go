@@ -24,6 +24,10 @@ func nativeEnvironmentPacket(s State) []byte {
  b[3]='5';e:=s.Environment
  for _,v:=range []float64{e.Clock,e.SunSize,e.Brightness,0}{b=binary.LittleEndian.AppendUint32(b,math.Float32bits(float32(v)))}
  if e.Celestial{binary.LittleEndian.PutUint32(b[len(b)-4:],math.Float32bits(1))}
- if e.FirstPerson{b[3]='6';b=binary.LittleEndian.AppendUint32(b,1)}
+ if e.SkySlots!=[6]uint32{} {
+  b[3]='7';flag:=uint32(0);if e.FirstPerson{flag=1};b=binary.LittleEndian.AppendUint32(b,flag)
+  for _,slot:=range e.SkySlots{b=binary.LittleEndian.AppendUint32(b,slot)}
+  for _,v:=range e.SkyBasis{b=binary.LittleEndian.AppendUint32(b,math.Float32bits(float32(v)))}
+ }else if e.FirstPerson{b[3]='6';b=binary.LittleEndian.AppendUint32(b,1)}
  return b
 }
