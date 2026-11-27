@@ -4,6 +4,7 @@ package main
 // delivery; does not read browser credentials or retry access denials.
 import (
  "bytes"
+ "image"
  "context"
  "encoding/binary"
  "encoding/json"
@@ -147,8 +148,8 @@ func(l *Lumenus)process(a assetRequest)assetResult{
  // No aggregate disk cap; per-file and GPU limits remain.
  if a.Kind=="image" {
   b:=l.bridge;b.mu.RLock();used:=0;for id,p:=range b.textures{if id!=a.ID{used+=len(p)}};slots:=len(b.textures);if _,ok:=b.textures[a.ID];ok{slots--};b.mu.RUnlock()
-  pixels,e:=decodeTextureBudget(data,used,slots)
-  if a.Asset=="local-studs.dds"{pixels,e=decodeStudAtlas(data)}
+  var pixels []uint32
+  if a.Asset=="local-studs.dds"{pixels,e=decodeStudAtlas(data)}else{pixels,e=decodeTextureBudget(data,used,slots)}
   if e!=nil{return assetResult{Status:"failed",Detail:"unsupported image format or dimensions"}}
   cfg,_,_:=image.DecodeConfig(bytes.NewReader(data))
   if strings.HasPrefix(a.Asset,"local-mtrl_")&&cfg.Width<=128&&cfg.Height<=128{sharpenPreview(pixels,pixelSide(len(pixels)))}
