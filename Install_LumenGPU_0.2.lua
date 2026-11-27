@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.9.8)')
+print('[LumenGPU] Client starting (0.9.9)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -52,11 +52,80 @@ local function ensureVirtualInput()
     if not virtualInput and os.clock()-lastVirtualWarning>5 then lastVirtualWarning=os.clock();warn('[LumenGPU] VirtualInput unavailable in this Studio session') end
     return virtualInput~=nil
 end
+local StarterGui=game:GetService('StarterGui')
+local toolSlots={}
+local inventoryOpen=false
+local inventorySelected=1
+local inventoryPage=1
+local function backpackEnabled()
+    if workspace:GetAttribute('LumenInventoryEnabled')==false then return false end
+    local ok,enabled=pcall(function() return StarterGui:GetCoreGuiEnabled(Enum.CoreGuiType.Backpack) end)
+    return not ok or enabled
+end
+local function refreshTools()
+    local found={}
+    local function scan(root)
+        if root then for _,o in root:GetChildren() do
+            if o:IsA('Tool') then found[o]=true end
+        end end
+    end
+    local bag=player:FindFirstChildOfClass('Backpack');local char=player.Character
+    scan(bag);scan(char)
+    local list={}
+    for _,t in toolSlots do if found[t] then list[#list+1]=t;found[t]=nil end end
+    local function append(root)
+        if root then for _,t in root:GetChildren() do if found[t] then list[#list+1]=t;found[t]=nil end end end
+    end
+    append(bag);append(char);toolSlots=list
+    inventorySelected=math.clamp(inventorySelected,1,math.max(1,#list))
+    inventoryPage=math.clamp(inventoryPage,1,math.max(1,math.ceil(math.max(0,#list-10)/20)))
+    return list
+end
+local function equipSlot(i)
+    local tools=refreshTools();local t=tools[i]
+    local char=player.Character;local hum=char and char:FindFirstChildOfClass('Humanoid')
+    if not t or not hum or hum.Health<=0 then return end
+    if t.Parent==char then hum:UnequipTools()
+    elseif t.Parent==player:FindFirstChildOfClass('Backpack') then hum:EquipTool(t) end
+    inventorySelected=i
+end
+local function inventoryKey(e)
+    if not backpackEnabled() then inventoryOpen=false;return false end
+    local vk=e.vk
+    if vk==192 or vk==222 then
+        if e.down and not e['repeat'] then
+            inventoryOpen=not inventoryOpen;refreshTools();inventoryPage=1
+        end
+        return true
+    end
+    local slot=vk>=49 and vk<=57 and vk-48 or vk==48 and 10 or nil
+    if slot then
+        if e.down and not e['repeat'] then equipSlot(slot) end
+        return true
+    end
+    if inventoryOpen and (vk==37 or vk==38 or vk==39 or vk==40 or vk==13 or vk==33 or vk==34) then
+        if e.down and not e['repeat'] then
+            refreshTools()
+            if vk==13 then equipSlot(inventorySelected)
+            elseif vk==33 or vk==34 then
+                local maxPage=math.max(1,math.ceil(math.max(0,#toolSlots-10)/20))
+                inventoryPage=math.clamp(inventoryPage+(vk==33 and -1 or 1),1,maxPage)
+                inventorySelected=math.min(math.max(1,#toolSlots),11+(inventoryPage-1)*20)
+            else
+                local delta=(vk==37 and -1 or vk==39 and 1 or vk==38 and -5 or 5)
+                inventorySelected=math.clamp(inventorySelected+delta,1,math.max(1,#toolSlots))
+                if inventorySelected>10 then inventoryPage=math.floor((inventorySelected-11)/20)+1 end
+            end
+        end
+        return true
+    end
+    return false
+end
 local function forwardKeys(events)
-    if type(events)~='table' or #events==0 or not ensureVirtualInput() then return end
+    if type(events)~='table' or #events==0 then return end
     for _,e in events do
         local key=keyCodes[keyNames[e.vk]]
-        if key then
+        if not inventoryKey(e) and key and ensureVirtualInput() then
             local down=e.down==true;local repeated=e['repeat']==true
             if repeated or (keyHeld[key]==true)~=down then
                 local ok,err=pcall(function() virtualInput:SendKey(down,key,repeated) end)
@@ -65,11 +134,29 @@ local function forwardKeys(events)
         end
     end
 end
+local function inventoryPointer(e)
+    if not backpackEnabled() then return false end
+    if e.button~=1 then return false end
+    local x,y=e.x,e.y
+    local n=math.min(10,#refreshTools())
+    local w=.075;local start=.5-n*w*.5
+    if n>0 and y>=.88 and y<=.975 and x>=start and x<start+n*w then
+        if e.down then equipSlot(math.floor((x-start)/w)+1) end
+        return true
+    end
+    if inventoryOpen and x>=.2 and x<.8 and y>=.32 and y<.76 then
+        local col=math.floor((x-.2)/.12);local row=math.floor((y-.32)/.11)
+        local i=11+(inventoryPage-1)*20+row*5+col
+        if e.down then equipSlot(i) end
+        return true
+    end
+    return false
+end
 local function forwardPointer(events)
-    if type(events)~='table' or #events==0 or not ensureVirtualInput() then return end
+    if type(events)~='table' or #events==0 then return end
     local cam=workspace.CurrentCamera;if not cam then return end
     for _,e in events do
-        if type(e)=='table' and type(e.x)=='number' and type(e.y)=='number' then
+        if type(e)=='table' and type(e.x)=='number' and type(e.y)=='number' and not inventoryPointer(e) and ensureVirtualInput() then
             local pos=Vector2.new(math.clamp(e.x,0,1)*cam.ViewportSize.X,math.clamp(e.y,0,1)*cam.ViewportSize.Y)
             local key=e.button==1 and Enum.UserInputType.MouseButton1 or e.button==2 and Enum.UserInputType.MouseButton2 or e.button==3 and Enum.UserInputType.MouseButton3 or nil
             local ok,err=pcall(function()
@@ -110,7 +197,7 @@ task.spawn(function()
 end)
 local function release(reason)
     if not external then return end
-    external=false; input={};firstPerson=false;restoreRotation();releasePointer()
+    external=false; input={};firstPerson=false;inventoryOpen=false;restoreRotation();releasePointer()
     print('[LumenGPU] External controls released: '..tostring(reason or 'stopped'))
     if controls then pcall(function() controls:Enable() end) end
     local cam=workspace.CurrentCamera; if cam then cam.CameraType=oldCameraType or Enum.CameraType.Custom;cam.FieldOfView=oldFov end
@@ -706,8 +793,11 @@ local faceVector={ [Enum.NormalId.Right]=Vector3.xAxis,[Enum.NormalId.Left]=-Vec
 local function lightRows()
     local cam=workspace.CurrentCamera;if not cam then return {} end
     local candidates={}
-    for o in lightObjects do
-        if o.Parent and o.Enabled and o.Range>0 and o.Brightness>0 then
+    local cameraLights={}
+    for _,o in cam:GetDescendants() do if o:IsA('PointLight') or o:IsA('SpotLight') or o:IsA('SurfaceLight') then cameraLights[o]=true end end
+    local all=table.clone(lightObjects);for o in cameraLights do all[o]=true end
+    for o in all do
+        if o.Parent and o:IsDescendantOf(workspace) and o.Enabled and o.Range>0 and o.Brightness>0 then
             local parent=o.Parent;local cf=parent:IsA('Attachment') and parent.WorldCFrame or parent:IsA('BasePart') and parent.CFrame or nil
             if cf then
                 local kind=o:IsA('PointLight') and 1 or o:IsA('SpotLight') and 2 or 3
@@ -766,7 +856,6 @@ local function refreshWorld()
     for _,obj in order do if tracked[obj] and not seen[obj] then seen[obj]=true;compact[#compact+1]=obj;dirty=true end end
     order=compact
     for _,row in terrainRows do if row.entry.state=='ready' and #static<15360 then static[#static+1]=row.part end end
-    for _,row in lightRows() do if #static<15360 then static[#static+1]=row end end
     local encoded=HTTP:JSONEncode(static)
     if encoded~=lastWorldJSON then
         serial+=1;local id=serial
@@ -950,6 +1039,12 @@ task.spawn(function()
 end)
 -- Only traverse moving objects here; the camera loop never scans the world.
 local cachedMoving={}
+local cachedLights={}
+task.spawn(function()
+    while task.wait(1/30) do
+        if active then local ok,rows=pcall(lightRows);if ok then cachedLights=rows end else cachedLights={} end
+    end
+end)
 task.spawn(function()
     while true do
         if active then
@@ -964,8 +1059,9 @@ task.spawn(function()
     end
 end)
 local function fastSnapshot()
-    if #particleRows==0 then return cachedMoving end
-    local rows=table.clone(cachedMoving)
+    if #particleRows==0 and #cachedLights==0 then return cachedMoving end
+    local rows=table.clone(cachedLights)
+    for _,row in cachedMoving do if #rows>=1024-#particleRows then break end;rows[#rows+1]=row end
     for _,row in particleRows do if #rows>=1024 then break end;rows[#rows+1]=row end
     return rows
 end
@@ -1025,6 +1121,35 @@ local function packColor(c,t)
     local function b(v) return math.clamp(math.floor(v*255+.5),0,255) end
     return b(c.R)+b(c.G)*256+b(c.B)*65536+b(1-t)*16777216
 end
+local function appendInventory(entries)
+    if not external or not backpackEnabled() then return end
+    local tools=refreshTools()
+    if #tools==0 and not inventoryOpen then return end
+    local function item(x,y,w,h,label,selected,equipped,sz)
+        if #entries>=256 then return end
+        local bg=equipped and 0xef57452b or selected and 0xef655040 or 0xe52c2724
+        entries[#entries+1]={x=x,y=y,w=w,h=h,cx=0,cy=0,cw=1,ch=1,size=sz or .020,border=.002,round=.008,bg=bg,fg=0xfff4f4f4,bc=equipped and 0xfff5c36f or selected and 0xffeeeeee or 0xff656565,ax=1,ay=1,text=label}
+    end
+    local function slot(i,x,y,w,h)
+        local t=tools[i];if not t then return end
+        local name=t.Name
+        -- Keep valid UTF-8 while limiting long names.
+        local ok,cut=pcall(utf8.offset,name,23);if ok and cut then name=string.sub(name,1,cut-1)..'...' end
+        local prefix=i<=10 and tostring(i%10)..'  ' or ''
+        item(x+.003,y+.003,w-.006,h-.006,prefix..name,inventoryOpen and inventorySelected==i,t.Parent==player.Character,.018)
+    end
+    local n=math.min(#tools,10)
+    local start=.5-n*.075*.5
+    for i=1,n do slot(i,start+(i-1)*.075,.88,.075,.095) end
+    if inventoryOpen then
+        local pageCount=math.max(1,math.ceil(math.max(0,#tools-10)/20))
+        item(.19,.20,.62,.58,'',false,false)
+        item(.2,.21,.60,.055,'Inventory  |  '..#tools..' tools  |  Page '..inventoryPage..'/'..pageCount,false,false,.024)
+        item(.2,.27,.60,.045,"1-0 hotbar | Arrows + Enter | PgUp/PgDn | ' close",false,false,.016)
+        if #tools<=10 then item(.22,.43,.56,.08,'All items are in the hotbar below.',false,false,.020) end
+        for j=0,19 do slot(11+(inventoryPage-1)*20+j,.2+(j%5)*.12,.32+math.floor(j/5)*.11,.12,.11) end
+    end
+end
 local function hudSnapshot(cam)
     local size=cam.ViewportSize;if size.X<1 or size.Y<1 then return {} end
     local inset=GuiService:GetGuiInset();local entries={};local pg=player:FindFirstChildOfClass('PlayerGui')
@@ -1033,7 +1158,7 @@ local function hudSnapshot(cam)
     for _,root in pg:GetChildren() do if root:IsA('ScreenGui') and root.Enabled and root~=gui then roots[#roots+1]=root end end
     table.sort(roots,function(a,b) return a.DisplayOrder<b.DisplayOrder end)
     local function visit(obj,clip,offset,depth)
-        if #entries>=256 or depth>32 or not obj:IsA('GuiObject') or not obj.Visible then return end
+        if #entries>=(external and 222 or 256) or depth>32 or not obj:IsA('GuiObject') or not obj.Visible then return end
         local pos=obj.AbsolutePosition+offset;local sz=obj.AbsoluteSize
         local x,y,w,h=pos.X/size.X,pos.Y/size.Y,sz.X/size.X,sz.Y/size.Y
         local text='';local fg=0;local ts=0;local ax,ay=1,1
@@ -1060,6 +1185,7 @@ local function hudSnapshot(cam)
         local offset=root.IgnoreGuiInset and Vector2.zero or inset
         for _,child in children do visit(child,{0,0,1,1},offset,0) end
     end
+    appendInventory(entries)
     return entries
 end
 local hudElapsed=0
@@ -1388,4 +1514,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.9.8 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.9.9 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')
