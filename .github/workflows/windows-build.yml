@@ -43,6 +43,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
-          name: LumenGPU-0.9.9a-Lumenus-Windows-x64
+          name: LumenGPU-0.9.9b-Lumenus-Windows-x64
           path: dist/
           if-no-files-found: error

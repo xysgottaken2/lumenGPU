@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.9.9a)')
+print('[LumenGPU] Client starting (0.9.9b)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -605,15 +605,26 @@ end
 local function avatarSnapshot()
     local list={};local char=player.Character;if not char then return list end
     requestDonor(char)
-    for _,obj in char:GetDescendants() do
-        if obj:IsA('BasePart') and obj.Name~='HumanoidRootPart' and obj.Transparency<.95 and obj:GetAttribute('PathIgnore')~=true and #list<64 then
+    local descendants=char:GetDescendants()
+    -- Capture equipped tool geometry first so accessories cannot consume its budget.
+    local ordered={}
+    for _,obj in descendants do if obj:IsA('BasePart') and obj:FindFirstAncestorOfClass('Tool') then ordered[#ordered+1]=obj end end
+    for _,obj in descendants do if obj:IsA('BasePart') and not obj:FindFirstAncestorOfClass('Tool') then ordered[#ordered+1]=obj end end
+    for _,obj in ordered do
+        if obj.Name~='HumanoidRootPart' and obj.Transparency<.95 and obj:GetAttribute('PathIgnore')~=true and #list<64 then
             local ok,row=pcall(materialPart,obj)
             if not ok then
                 local now=os.clock()
                 if now-(lastAvatarWarning[obj] or -100)>10 then lastAvatarWarning[obj]=now;warn('[LumenGPU] Avatar part '..obj.Name..': '..tostring(row)) end
                 ok,row=pcall(avatarFallback,obj)
             end
-            if ok and row then list[#list+1]=row end
+            if ok and row then
+                if obj:FindFirstAncestorOfClass('Tool') then
+                    row.cloth=row.cloth or {0,0,0,0,0,0,0,0}
+                    row.cloth[8]=1
+                end
+                list[#list+1]=row
+            end
         end
     end
     return list
@@ -1536,4 +1547,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.9.9a Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.9.9b Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')

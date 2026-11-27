@@ -18,6 +18,14 @@ func TestClothingWire(t *testing.T){
  p.Cloth[5]=.8;if validCloth(p.Cloth){t.Fatal("invalid atlas span accepted")};p.Cloth[5]=.4;p.Cloth[0]=129;if validCloth(p.Cloth){t.Fatal("invalid slot accepted")}
 }
 
+func TestToolVisibilityWire(t *testing.T){
+ p:=Part{Cloth:[8]float64{0,0,0,0,0,0,0,1}}
+ if !validCloth(p.Cloth){t.Fatal("tool marker rejected")}
+ b:=nativePacket(State{Parts:[]Part{p}})
+ if string(b[:4])!="LGC4"||len(b)!=296||math.Float32frombits(binary.LittleEndian.Uint32(b[292:]))!=1{t.Fatal("tool marker lost")}
+ p.Cloth[7]=2;if validCloth(p.Cloth){t.Fatal("invalid tool marker")}
+}
+
 func TestParticleMetadata(t *testing.T){
  a:=[8]float64{0,0,0,0,.5,0,4,.75}
  if !validExtra(a){t.Fatal("valid particle rejected")};a[7]=-.1;if validExtra(a){t.Fatal("negative opacity accepted")};a[7]=1;a[6]=5;if validExtra(a){t.Fatal("unknown marker accepted")}

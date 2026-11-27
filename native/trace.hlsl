@@ -243,13 +243,33 @@ float localLightWeight(Material l,float3 p,float3 gn,float3 n,out float3 wi,out 
  float3 delta=l.ax.xyz-p;dist=length(delta);wi=0;attenuation=0;
  if(dist<.006||dist>=l.roughEmit.x)return 0;
  wi=delta/dist;float nl=dot(n,wi);if(nl<=0||dot(gn,wi)<=0)return 0;
- float cone=1;if(l.extra1.z>1){float cosA=dot(-wi,l.ay.xyz);cone=smoothstep(l.extra1.w-.001,min(1.,l.extra1.w+.08),cosA);if(l.extra1.z==3)cone*=saturate(cosA);}
+ float cone=1;if(l.extra1.z>1){float cosA=dot(-wi,l.ay.xyz);cone=smoothstep(l.extra1.w-.001,max(l.extra1.w+.001,min(1.,l.extra1.w+.08)),cosA);if(l.extra1.z==3)cone*=saturate(cosA);}
  attenuation=pow(saturate(1-dist/l.roughEmit.x),2)*l.roughEmit.y*3.0*cone;
  return attenuation*nl*max(.001,luma(linearColor(l.colorMetal.xyz)));
 }
+float3 directLocalContribution(Material l,float3 p,float3 gn,float3 n,float3 wo,float3 c,float metal,float rough,float ior,float spec,float prob){
+ float3 wi;float dist,attenuation;
+ if(localLightWeight(l,p,gn,n,wi,dist,attenuation)<=0)return 0;
+ float pdf;float3 f=evalBSDF(n,wo,wi,c,metal,rough,ior,spec,prob,pdf);
+ return f*dot(n,wi)*linearColor(l.colorMetal.xyz)*attenuation*(l.extra1.x>.5?lightVisibilityTo(p+gn*.003,wi,max(.001,dist-.007),true):float3(1,1,1));
+}
+float3 stablePrimaryLights(uint base,uint count,float3 p,float3 gn,float3 n,float3 wo,float3 c,float metal,float rough,float ior,float spec,float prob){
+ float3 result=0;float best=0,second=0;uint a=base,b=base;
+ [loop]for(uint j=0;j<count;++j){
+  Material l=mats[base+j];float3 wi;float dist,attenuation;
+  float w=localLightWeight(l,p,gn,n,wi,dist,attenuation);if(w<=0)continue;
+  if(l.extra1.x<=.5){float pdf;result+=evalBSDF(n,wo,wi,c,metal,rough,ior,spec,prob,pdf)*dot(n,wi)*linearColor(l.colorMetal.xyz)*attenuation;}
+  else if(w>best){second=best;b=a;best=w;a=base+j;}
+  else if(w>second){second=w;b=base+j;}
+ }
+ if(best>0)result+=directLocalContribution(mats[a],p,gn,n,wo,c,metal,rough,ior,spec,prob);
+ if(second>0)result+=directLocalContribution(mats[b],p,gn,n,wo,c,metal,rough,ior,spec,prob);
+ return result;
+}
 float3 sampleLocalLight(float3 p,float3 gn,float3 n,float3 wo,float3 c,float metal,float rough,float ior,float spec,float prob,inout uint seed,bool primary){
  uint flags=visualFlags(),count=flags&127u;if(count==0)return 0;
- uint base=flags>>9,k=primary?count:min(count,4u),selected=base;float sum=0,chosenWeight=0;
+ uint base=flags>>9;if(primary)return stablePrimaryLights(base,count,p,gn,n,wo,c,metal,rough,ior,spec,prob);
+ uint k=min(count,4u),selected=base;float sum=0,chosenWeight=0;
  [loop]for(uint j=0;j<k;++j){
   uint at=base+(k==count?j:min(count-1,uint(rnd(seed)*count)));
   float3 wi;float dist,attenuation;float w=localLightWeight(mats[at],p,gn,n,wi,dist,attenuation);
