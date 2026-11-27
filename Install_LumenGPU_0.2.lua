@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.9.6)')
+print('[LumenGPU] Client starting (0.9.6a)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -157,7 +157,10 @@ local imageScanned=setmetatable({},{__mode='k'})
 local function numericAsset(uri)
     if type(uri)~='string' then return nil end
     local id=uri:match('^rbxassetid://(%d+)$') or uri:match('^(%d+)$')
-    if not id then id=uri:match('^https?://www%.roblox%.com/asset/?%?id=(%d+)$') or uri:match('^https?://www%.roblox%.com/asset/?%?id=(%d+)&') or uri:match('^https?://assetdelivery%.roblox%.com/v1/asset/?%?id=(%d+)$') end
+    if not id then
+        local query=uri:match('^https?://www%.roblox%.com/asset/?%?(.+)$') or uri:match('^https?://roblox%.com/asset/?%?(.+)$') or uri:match('^https?://assetdelivery%.roblox%.com/v1/asset/?%?(.+)$')
+        if query then id=('&'..query..'&'):match('&id=(%d+)&') end
+    end
     if id and #id<=20 and not id:match('^0') then return id end
     return nil
 end
@@ -455,7 +458,6 @@ local function materialPart(obj)
     return {p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),b=vec(c.ZVector),s=vec(size),c={color.R,color.G,color.B},metal=num('PathMetallic',metal,0,1),rough=num('PathRoughness',rough,.025,1),emit=num('PathEmission',(obj:GetAttribute('PathEmissive')==true or mat==Enum.Material.Neon) and 4 or 0,0,50),transmission=num('PathTransmission',mat==Enum.Material.Glass and 1 or obj.Transparency,0,1),ior=num('PathIOR',1.5,1.001,3),shape=shape,specular=num('PathSpecular',1,0,1),emissionColor={ec.R,ec.G,ec.B},tex=tex or nil,extra=ex,cloth=garmentData(obj)}
 end
 local cachedCharacter={}
-local poseSerial=0
 local function clearDonor()
     for _,cm in donorMeshes do cm:Destroy() end;donorMeshes={};donorHead=nil;donorChar=nil;donorRequested=nil
 end
@@ -515,12 +517,12 @@ task.spawn(function()
                 if char then for _,obj in char:GetDescendants() do if obj:IsA('BasePart') then imageScanned[obj]=nil end end end
             end
             local ok,rows=pcall(avatarSnapshot)
-            if ok then cachedCharacter=rows;poseSerial+=1 end
-        else if #cachedCharacter>0 then cachedCharacter={};poseSerial+=1 end end
+            if ok then cachedCharacter=rows end
+        else cachedCharacter={} end
     end
 end)
-player.CharacterAdded:Connect(function() cachedCharacter={};poseSerial+=1;clearDonor() end)
-player.CharacterRemoving:Connect(function() cachedCharacter={};poseSerial+=1;clearDonor() end)
+player.CharacterAdded:Connect(function() cachedCharacter={};clearDonor() end)
+player.CharacterRemoving:Connect(function() cachedCharacter={};clearDonor() end)
 -- Capture the actual local viewport's world, including client-only parts.
 local HTTP=game:GetService('HttpService')
 local order,tracked,dynamic={},{},{}
@@ -1023,29 +1025,57 @@ local hudLast=''
 local hudLastSend=-100
 local elapsed=0
 local fastElapsed=0
-local lastPoseSent=-1
-local lastPoseTime=-100
-local skySlots={0,0,0,0,0,0}
-local skyBasis={0,0,0,0,0,0,0,0,0}
+-- Sky faces get their own bounded status polling, independent of the mesh/image queue.
+local skyState={slots={0,0,0,0,0,0},basis={0,0,0,0,0,0,0,0,0},entries={},signature=''}
 local skyProps={'SkyboxRt','SkyboxLf','SkyboxUp','SkyboxDn','SkyboxBk','SkyboxFt'}
+remote.OnClientEvent:Connect(function(kind,id,info)
+    if kind~='skyImageAck' or type(info)~='table' then return end
+    local entry=skyState.entries[id];if not entry then return end
+    local previous=entry.status
+    entry.status=info.status or 'failed';entry.slot=tonumber(info.slot) or 0
+    entry.next=os.clock()+(entry.status=='queued' and 2 or 5)
+    if previous~=entry.status then
+        local message='[LumenGPU Sky] image '..id..': '..entry.status..' '..tostring(info.detail or '')
+        if entry.status=='failed' then warn(message) else print(message) end
+    end
+end)
 task.spawn(function()
     while task.wait(.25) do
-        if active then
-            local sky=LocalLighting:FindFirstChildOfClass('Sky')
-            local slots={0,0,0,0,0,0}
-            local basis={0,0,0,0,0,0,0,0,0}
-            if sky then
-                local any=false
-                for i,prop in skyProps do slots[i]=discoverImage(sky[prop]);if slots[i]>0 then any=true end end
-                if any then
-                    local ok,angles=pcall(function() return sky.SkyboxOrientation end)
-                    if not ok or typeof(angles)~='Vector3' then angles=Vector3.zero end
-                    local r=CFrame.fromEulerAnglesYXZ(math.rad(angles.X),math.rad(angles.Y),math.rad(angles.Z))
-                    basis={r.RightVector.X,r.RightVector.Y,r.RightVector.Z,r.UpVector.X,r.UpVector.Y,r.UpVector.Z,r.ZVector.X,r.ZVector.Y,r.ZVector.Z}
-                end
+        if not active then continue end
+        local sky=LocalLighting:FindFirstChildOfClass('Sky')
+        local uris={}
+        if sky then for i,prop in skyProps do uris[i]=sky[prop] end end
+        local signature=table.concat(uris,'|')
+        if signature~=skyState.signature then
+            skyState.signature=signature;skyState.entries={}
+            for i,uri in uris do
+                local id=numericAsset(uri)
+                if id then
+                    if not skyState.entries[id] then skyState.entries[id]={status='new',slot=0,next=0} end
+                    print('[LumenGPU Sky] '..skyProps[i]..' -> '..id)
+                else warn('[LumenGPU Sky] '..skyProps[i]..': unsupported or empty content URI: '..tostring(uri)) end
             end
-            skySlots=slots;skyBasis=basis
         end
+        local now=os.clock()
+        for id,entry in skyState.entries do
+            if entry.status~='ready' and entry.status~='failed' and now>=entry.next then
+                entry.next=now+6
+                remote:FireServer('skyImage',id)
+                break
+            end
+        end
+        local slots={0,0,0,0,0,0};local basis={0,0,0,0,0,0,0,0,0};local any=false
+        for i,uri in uris do
+            local id=numericAsset(uri);local entry=id and skyState.entries[id]
+            if entry and entry.status=='ready' and entry.slot>0 then slots[i]=entry.slot;any=true end
+        end
+        if any then
+            local ok,angles=pcall(function() return sky.SkyboxOrientation end)
+            if not ok or typeof(angles)~='Vector3' then angles=Vector3.zero end
+            local r=CFrame.fromOrientation(math.rad(angles.X),math.rad(angles.Y),math.rad(angles.Z))
+            basis={r.RightVector.X,r.RightVector.Y,r.RightVector.Z,r.UpVector.X,r.UpVector.Y,r.UpVector.Z,r.ZVector.X,r.ZVector.Y,r.ZVector.Z}
+        end
+        skyState.slots=slots;skyState.basis=basis
     end
 end)
 RunService:BindToRenderStep('LumenGPU_ExternalCamera',Enum.RenderPriority.Camera.Value+1,function(dt)
@@ -1062,14 +1092,10 @@ RunService:BindToRenderStep('LumenGPU_ExternalCamera',Enum.RenderPriority.Camera
     local sky=LocalLighting:FindFirstChildOfClass('Sky')
     local head=player.Character and player.Character:FindFirstChild('Head')
     local hideAvatar=external and firstPerson or (not external and (player.CameraMode==Enum.CameraMode.LockFirstPerson or (head and (c.Position-head.Position).Magnitude<=.9)))
-    local environment={clock=LocalLighting.ClockTime,sunSize=sky and sky.SunAngularSize or 11,brightness=LocalLighting.Brightness,celestial=not sky or sky.CelestialBodiesShown,firstPerson=hideAvatar==true,skySlots=skySlots,skyBasis=skyBasis}
+    local environment={clock=LocalLighting.ClockTime,sunSize=sky and sky.SunAngularSize or 11,brightness=LocalLighting.Brightness,celestial=not sky or sky.CelestialBodiesShown,firstPerson=hideAvatar==true,skySlots=skyState.slots,skyBasis=skyState.basis}
     if fastElapsed>=1/30 then fastElapsed=fastElapsed%(1/30);fast=fastSnapshot() end
-    -- Camera is independent; pose and moving updates are separately coalesced.
-    remote:FireServer('camera',{p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),f=vec(c.LookVector),fov=cam.FieldOfView,sun=vec(LocalLighting:GetSunDirection()),environment=environment})
-    if fast then remote:FireServer('moving',fast) end
-    if lastPoseSent~=poseSerial or os.clock()-lastPoseTime>.5 then
-        lastPoseSent=poseSerial;lastPoseTime=os.clock();remote:FireServer('pose',cachedCharacter)
-    end
+    -- Character and camera are sampled during the same render step.
+    remote:FireServer('camera',{p=vec(c.Position),r=vec(c.RightVector),u=vec(c.UpVector),f=vec(c.LookVector),fov=cam.FieldOfView,sun=vec(LocalLighting:GetSunDirection()),environment=environment},cachedCharacter,fast)
 end)
 RunService.Heartbeat:Connect(function()
     if not active then return end
@@ -1095,7 +1121,6 @@ local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera'
 local owner,latest=nil,nil
 local latestAvatar={} -- other moving objects
 local latestCharacter={}
-local poseSerial=0;local poseSent=-1;local poseWS=nil;local poseOpen=false;local posePending=nil;local poseRetry=0;local lastPoseHTTP=-100;local lastPoseWire=-100;local poseRejectedUntil=0;local lastPoseWarning=-100
 local latestEnvironment=nil;local latestSun=nil
 local latestHUD={};local hudSerial=0;local sentHUD=-1
 local cameraSerial=0;local sentCamera=-1;local cameraSentAt=0
@@ -1121,31 +1146,7 @@ local function closeGeometry()
  local old=geometryWS;geometryWS=nil;geometryOpen=false;geometryPending=nil;sentAvatar=-1;lastPartsJSON=nil
  if old then pcall(function() old:Close() end) end
 end
-local function closePose()
- local old=poseWS;poseWS=nil;poseOpen=false;posePending=nil;poseSent=-1
- if old then pcall(function() old:Close() end) end
-end
-local function closeWS() closeCamera();closeGeometry();closePose() end
-local function connectPose()
- if poseWS or os.clock()<poseRetry then return end
- poseRetry=os.clock()+2
- local ok,c=pcall(function() return HTTP:CreateWebStreamClient(Enum.WebStreamClientType.WebSocket,{Url='ws://127.0.0.1:8765/api/pose-ws'}) end)
- if not ok or not c then return end
- poseWS=c
- local function opened() if poseWS==c then poseOpen=true;posePending=nil;poseSent=-1 end end
- c.Opened:Connect(opened)
- c.MessageReceived:Connect(function(msg)
-  if poseWS~=c then return end
-  local p=posePending;posePending=nil
-  local good,reply=pcall(function() return HTTP:JSONDecode(msg) end)
-  if good and type(reply)=='table' and not reply.error then if p then poseSent=p.serial end
-  else poseSent=-1;poseRejectedUntil=os.clock()+.25;if os.clock()-lastPoseWarning>2 then lastPoseWarning=os.clock();warn('[LumenGPU] Pose rejected: '..tostring(good and type(reply)=='table' and reply.error or 'invalid reply')) end end
- end)
- local function failed() if poseWS==c then closePose();poseRetry=os.clock()+1 end end
- c.Closed:Connect(failed);c.Error:Connect(failed)
- if c.ConnectionState.Name=='Open' then opened() end
- task.delay(3,function() if poseWS==c and not poseOpen then failed() end end)
-end
+local function closeWS() closeCamera();closeGeometry() end
 local function connectCamera()
  if cameraWS or os.clock()<cameraRetry then return end
  cameraRetry=os.clock()+2
@@ -1193,7 +1194,7 @@ end
 local function vec(v) return {v.X,v.Y,v.Z} end
 remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
     if cmd=='start' and (not owner or owner==player) then
-        if not owner then owner=player; latest=nil; latestAvatar={};latestCharacter={};poseSerial+=1;poseSent=-1;latestHUD={};hudSerial+=1;sentHUD=-1;cameraSerial=0;sentCamera=-1;avatarSerial=0;sentAvatar=-1; latestWorld=nil;worldSerial=0;pending=nil;lastSnapshot=-100; lastPartsJSON=nil; print('[LumenGPU] Local bridge started') end
+        if not owner then owner=player; latest=nil; latestAvatar={};latestCharacter={};latestHUD={};hudSerial+=1;sentHUD=-1;cameraSerial=0;sentCamera=-1;avatarSerial=0;sentAvatar=-1; latestWorld=nil;worldSerial=0;pending=nil;lastSnapshot=-100; lastPartsJSON=nil; print('[LumenGPU] Local bridge started') end
         remote:FireClient(player,'status','Waiting for HTTP')
     elseif cmd=='stop' and owner==player then owner=nil; latest=nil;pending=nil;closeWS()
     elseif cmd=='lumenusMesh' and owner==player then
@@ -1212,6 +1213,21 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
                 task.wait(2)
             until owner~=player or os.clock()>deadline
             if owner==player then remote:FireClient(player,'lumenusMeshAck',meshId,result or false) end
+        end)
+    elseif cmd=='skyImage' and owner==player then
+        if type(data)~='string' or #data>20 or not data:match('^[1-9]%d*$') then return end
+        local asset=data
+        task.spawn(function()
+            local ok,res=pcall(function() return HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/lumenus',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode({kind='image',asset=asset,id=0})}) end)
+            if owner~=player then return end
+            local info
+            if ok and res.Success then
+                local good,decoded=pcall(function() return HTTP:JSONDecode(res.Body) end)
+                if good and type(decoded)=='table' then info=decoded end
+            elseif ok then
+                info={status=res.StatusCode==429 and 'retry' or 'failed',detail='HTTP '..res.StatusCode..': '..tostring(res.Body):sub(1,180)}
+            end
+            remote:FireClient(player,'skyImageAck',asset,info or {status='retry',detail='bridge not reachable'})
         end)
     elseif cmd=='lumenusImage' and owner==player then
         if type(data)~='string' or #data>20 or not data:match('^[1-9]%d*$') or type(avatar)~='number' or avatar%1~=0 or avatar<1 or avatar>128 then return end
@@ -1250,15 +1266,11 @@ remote.OnServerEvent:Connect(function(player,cmd,data,avatar,moving)
     elseif cmd=='worldEnd' and owner==player and pending and data==pending.serial then
         if #pending.rows==pending.count then latestWorld=pending.rows;worldSerial=pending.serial;print('[LumenGPU] Accepted client world '..worldSerial..': '..#latestWorld..' static parts') end;pending=nil
     elseif cmd=='hud' and owner==player and type(data)=='table' and #data<=256 then latestHUD=data;hudSerial+=1
-    elseif cmd=='moving' and owner==player and type(data)=='table' and #data<=1024 then
-        latestAvatar=data;avatarSerial+=1
-    elseif cmd=='pose' and owner==player and type(data)=='table' and #data<=64 then
-        latestCharacter=data;poseSerial+=1
     elseif cmd=='camera' and owner==player and type(data)=='table' then
         if type(data.p)=='table' and #data.p==3 and type(data.r)=='table' and #data.r==3 and type(data.u)=='table' and #data.u==3 and type(data.f)=='table' and #data.f==3 and type(data.fov)=='number' then
             latest=data;cameraSerial+=1
             latestEnvironment=data.environment;latestSun=data.sun
-            if type(avatar)=='table' and #avatar<=64 then latestCharacter=avatar;poseSerial+=1 end
+            if type(avatar)=='table' and #avatar<=64 then latestCharacter=avatar end
             if type(moving)=='table' and #moving<=1024 then latestAvatar=moving;avatarSerial+=1 end
         end
     end
@@ -1280,7 +1292,7 @@ task.spawn(function()
      if sentCamera==cameraSerial and now-cameraSentAt<.1 then return end
      local serial=cameraSerial
      local hud=sentHUD~=hudSerial and latestHUD or nil
-     local payload=HTTP:JSONEncode({camera=latest,sun=latestSun or vec(Lighting:GetSunDirection()),environment=latestEnvironment,hud=hud})
+     local payload=HTTP:JSONEncode({camera=latest,character=latestCharacter,sun=latestSun or vec(Lighting:GetSunDirection()),environment=latestEnvironment,hud=hud})
      outstanding+=1
      local sent,e=pcall(function() cameraWS:Send(payload) end)
      if not sent then closeCamera();error(e) end
@@ -1289,7 +1301,7 @@ task.spawn(function()
      -- Compatibility fallback retains geometry when both sockets are unavailable.
      lastHTTP=now
      local hud=sentHUD~=hudSerial and latestHUD or nil
-     local update={camera=latest,sun=latestSun or vec(Lighting:GetSunDirection()),environment=latestEnvironment,hud=hud}
+     local update={camera=latest,character=latestCharacter,sun=latestSun or vec(Lighting:GetSunDirection()),environment=latestEnvironment,hud=hud}
      -- Geometry fallback is owned by the independent geometry task.
      local res=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/update-controls',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode(update)})
      if not res.Success then error('HTTP '..res.StatusCode..': '..tostring(res.Body):sub(1,180)) end
@@ -1298,31 +1310,6 @@ task.spawn(function()
     end
    end)
    if not ok and os.clock()-lastError>2 then lastError=os.clock();warn('[LumenGPU] Camera: '..tostring(err)) end
-  end
- end
-end)
--- Pose uses a separate socket, not the camera or large world channel.
-task.spawn(function()
- while task.wait(1/60) do
-  if owner and latest then
-   local ok,err=pcall(function()
-    connectPose()
-    local now=os.clock()
-    if now<poseRejectedUntil then return end
-    if poseOpen then
-     if posePending then if now-posePending.at>1 then closePose() end;return end
-     if poseSent==poseSerial and now-lastPoseWire<1 then return end
-     local serial=poseSerial;local payload=HTTP:JSONEncode({character=latestCharacter})
-     posePending={serial=serial,at=now};lastPoseWire=now
-     local sent,e=pcall(function() poseWS:Send(payload) end)
-     if not sent then closePose();error(e) end
-    elseif now-lastPoseHTTP>=.25 and poseSent~=poseSerial then
-     lastPoseHTTP=now;local serial=poseSerial
-     local res=HTTP:RequestAsync({Url='http://127.0.0.1:8765/api/pose-update',Method='POST',Headers={['Content-Type']='application/json'},Body=HTTP:JSONEncode({character=latestCharacter})})
-     if res.Success then poseSent=serial end
-    end
-   end)
-   if not ok then closePose();poseRetry=os.clock()+1;if os.clock()-lastPoseWarning>2 then lastPoseWarning=os.clock();warn('[LumenGPU] Pose transport: '..tostring(err)) end end
   end
  end
 end)
@@ -1359,4 +1346,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.9.6 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.9.6a Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')
