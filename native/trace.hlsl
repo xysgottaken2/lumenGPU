@@ -40,7 +40,7 @@ float2 faceUV(uint face,float3 p){
  return float2(-p.x,-p.y)+.5;
 }
 bool materialUV(Material m,uint primitive,float3 p,float2 bary,out float2 uv){
- uv=0;uint mode=uint(m.tex0.y);if(mode==7)return false;
+ uv=0;uint mode=uint(m.tex0.y);if(mode>=7)return false;
  if(mode==0){
   if(m.az.w<=0)return false;uint at=uint(m.az.w)+primitive*3;uv=meshNormals[at].xy*(1-bary.x-bary.y)+meshNormals[at+1].xy*bary.x+meshNormals[at+2].xy*bary.y;
  }else{
@@ -96,7 +96,7 @@ void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,
  c=linearColor(m.colorMetal.xyz);float2 uv;
  float scale=max(.1,max(m.scaleSpec.x,max(m.scaleSpec.y,m.scaleSpec.z)));
  if(shape==0){uint face=primitive/2+1;scale=max(.1,face<=2?min(m.scaleSpec.z,m.scaleSpec.y):face<=4?min(m.scaleSpec.x,m.scaleSpec.z):min(m.scaleSpec.x,m.scaleSpec.y));}
- float lod=right.w<0?0:clamp(log2(max(1.,distance*2*eye.w*256*max(1.,max(abs(m.tex0.z),abs(m.tex0.w)))/(dims.y*scale))),0.,8.);
+ float lod=right.w<0?-10.:clamp(log2(max(.001,distance*2*eye.w*256*max(1.,max(abs(m.tex0.z),abs(m.tex0.w)))/(dims.y*scale)))+display.w,-10.,8.);
  bool hasUV=materialUV(m,primitive,lp,bary,uv);
  float3 t=m.ax.xyz,b=m.az.xyz;
  if(shape==3){uint at=uint(m.ay.w)+primitive*6;t=tangentWorld(m,meshNormals[at+4]);b=tangentWorld(m,meshNormals[at+5]);}
@@ -105,16 +105,27 @@ void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,
   if(face<=2){t=m.az.xyz*(face==1?-1:1);b=-m.ay.xyz;}
   else if(face<=4){t=m.ax.xyz;b=m.az.xyz*(face==3?1:-1);}
   else{t=m.ax.xyz*(face==5?1:-1);b=-m.ay.xyz;}
-  if((visualFlags()&256u)!=0){
-   uint kind=(uint(m.extra0.x)>>((face-1)*2))&3u;
-   if(kind>0){
+  // A loaded albedo texture wins over legacy surface patterns.
+  if((visualFlags()&256u)!=0&&(m.tex0.x<=0||m.tex0.y==8)){
+   uint kind=(uint(m.extra0.x)>>((face-1)*3))&7u;
+   if(kind>0&&kind<=4){
     float2 scale=face<=2?m.scaleSpec.zy:face<=4?m.scaleSpec.xz:m.scaleSpec.xy;
-    float2 delta=frac(faceUV(face,lp)*scale)-.5;float rad=length(delta);
-    float ring=smoothstep(.23,.29,rad)*(1-smoothstep(.34,.40,rad));
-    float signBump=kind==2?-1:1;
-    if(kind==3)signBump=delta.x*delta.y>0?-1:1;
-    n=bumpNormal(n,t,b,delta/max(rad,.001)*ring*signBump*.65);
-    c*=1-.12*ring;
+    float2 coord=faceUV(face,lp)*scale;
+    float fade=saturate(1-distance*2*eye.w*3/dims.y);
+    if(m.tex0.y==8&&m.tex0.x>0){
+     uint cell=kind-1;
+     float2 atlasUV=(float2(cell%2,cell/2)*128+clamp(frac(coord*.5)*128,.5,127.5))/256.;
+     float shade=luma(assetSample(uint(m.tex0.x),atlasUV,false).rgb);
+     c*=lerp(1.,clamp(shade/.51,.35,1.8),fade);
+    }else{
+     float2 delta=frac(coord)-.5;float rad=length(delta);
+     float ring=smoothstep(.23,.29,rad)*(1-smoothstep(.34,.40,rad));
+     float signBump=kind==2?-1:1;
+     if(kind==3)signBump=delta.x*delta.y>0?-1:1;
+     if(kind==4)ring=1-smoothstep(.03,.09,abs(abs(delta.x)-abs(delta.y)));
+     n=bumpNormal(n,t,b,delta/max(rad,.001)*ring*signBump*.65*fade);
+     c*=1-.12*ring*fade;
+    }
    }
   }
   if(m.extra1.y>0&&face==3){
@@ -125,11 +136,11 @@ void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,
   }
  }
  if(m.tex0.y==7){
-  float3 an=abs(n);float rate=max(.015625,m.tex0.z);
+  float3 an=abs(n);float rate=max(.001,m.tex0.z*display.z);
   if(an.x>=an.y&&an.x>=an.z){uv=worldP.zy*float2(n.x>=0?-1:1,-1)*rate;t=float3(0,0,n.x>=0?-1:1);b=float3(0,-1,0);}
   else if(an.y>=an.z){uv=worldP.xz*float2(1,n.y>=0?1:-1)*rate;t=float3(1,0,0);b=float3(0,0,n.y>=0?1:-1);}
   else{uv=worldP.xy*float2(n.z>=0?1:-1,-1)*rate;t=float3(n.z>=0?1:-1,0,0);b=float3(0,-1,0);}
-  hasUV=true;lod=right.w<0?0:clamp(log2(max(1.,distance*2*eye.w*256*rate/dims.y)),0.,8.);
+  hasUV=true;lod=right.w<0?-10.:clamp(log2(max(.001,distance*2*eye.w*256*rate/dims.y))+display.w,-10.,8.);
  }
  if(!hasUV){c=applyClothes(m,primitive,shape,lp,bary,c,lod);return;}
  bool wrap=m.tex1.w>0;
@@ -152,7 +163,7 @@ void materialSurface(Material m,uint primitive,uint shape,float3 lp,float2 bary,
   float3 nn=assetSampleLod(uint(m.extra0.y),uv,wrap,lod).xyz*2-1;
   n=bumpNormal(n,t,b,nn.xy/max(.2,nn.z));
  }else if((visualFlags()&128u)!=0&&m.extra1.x>0&&m.tex0.x>0){
-  uint off=uint(m.tex0.x);float stepUV=max(1./float(sunPixels[off]),exp2(round(lod))/256.);
+  uint off=uint(m.tex0.x);float stepUV=max(1./float(sunPixels[off]),exp2(max(-10.,round(lod)))/256.);
   float h=luma(assetSampleLod(off,uv,wrap,lod).rgb);
   float hx=luma(assetSampleLod(off,uv+float2(stepUV,0),wrap,lod).rgb)-h;
   float hy=luma(assetSampleLod(off,uv+float2(0,stepUV),wrap,lod).rgb)-h;
@@ -360,7 +371,7 @@ float weightGuide(float4 g,float4 a,float4 gg,float4 aa){
  if(g.w==0)return 1;
  float wn=pow(saturate(dot(g.xyz,gg.xyz)),32);
  float wz=exp(-abs(g.w-gg.w)/max(.05,g.w*.035*display.w));
- float wa=exp(-length(a.xyz-aa.xyz)*8);
+ float wa=exp(-length(a.xyz-aa.xyz)*lerp(8.,28.,saturate(environment.x)));
  return wn*wz*wa;
 }
 
@@ -377,7 +388,7 @@ float4 waveRead(uint idx,int pass){if(pass==0)return history[idx];if(pass%2==1)r
   int2 xy=clamp(int2(id.xy)+int2(x,y)*stride,int2(0,0),int2(w-1,h-1));uint j=xy.y*w+xy.x;
   float4 gg=guides[j],aa=albedos[j],v=waveRead(j,pass);float edge=0;
   if(g.w==0&&gg.w==0)edge=1;
-  else if(g.w>0&&gg.w>0){edge=pow(saturate(dot(g.xyz,gg.xyz)),32)*exp(-abs(g.w-gg.w)/max(.04,g.w*.022*stride))*exp(-length(a.xyz-aa.xyz)*10);}
+  else if(g.w>0&&gg.w>0){edge=pow(saturate(dot(g.xyz,gg.xyz)),32)*exp(-abs(g.w-gg.w)/max(.04,g.w*.022*stride))*exp(-length(a.xyz-aa.xyz)*lerp(10.,32.,saturate(environment.x)));}
   float weight=waveKernel[x+2]*waveKernel[y+2]*edge*exp(-abs(lum(v.rgb)-lum(center.rgb))/sigma);
   sum+=v.rgb*weight;weights+=weight;
  }

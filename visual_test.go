@@ -29,7 +29,7 @@ func TestToolVisibilityWire(t *testing.T){
 func TestBuiltinMaterialProjection(t *testing.T){
  a:=[8]float64{1,7,.25,.25,0,0,1,1}
  if !validTexture(a){t.Fatal("valid material projection rejected")}
- a[1]=8;if validTexture(a){t.Fatal("unknown projection accepted")}
+ a[1]=9;if validTexture(a){t.Fatal("unknown projection accepted")}
 }
 
 func TestParticleMetadata(t *testing.T){

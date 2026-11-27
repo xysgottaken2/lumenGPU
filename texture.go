@@ -13,7 +13,7 @@ const textureMax=128
 const texturePixelBudget=24*1024*1024 // 96 MiB base pixels, plus mip levels on GPU
 func textureResolution(w,h int,used,slots int)int{
  side:=textureSide;long:=w;if h>long{long=h}
- if long>256{side=512};if long>512{side=1024}
+ if long>256{side=512};if long>512{side=1024};if cap:=textureQualityLimit();side>cap{side=cap}
  for side>textureSide&&used+side*side+(textureMax-slots-1)*textureSide*textureSide>texturePixelBudget{side/=2}
  return side
 }
@@ -23,7 +23,7 @@ func validUV(v UV)bool{return finite(v[0])&&finite(v[1])&&math.Abs(v[0])<=4096&&
 func validTexture(t [8]float64)bool{
  for _,x:=range t{if !finite(x){return false}}
  if t[0]==0{return t==[8]float64{}}
- return t[0]>=1&&t[0]<=textureMax&&t[0]==math.Trunc(t[0])&&t[1]>=0&&t[1]<=7&&t[1]==math.Trunc(t[1])&&t[2]>0&&t[2]<=4096&&t[3]>0&&t[3]<=4096&&math.Abs(t[4])<=4096&&math.Abs(t[5])<=4096&&t[6]>=0&&t[6]<=1&&(t[7]==0||t[7]==1)
+ return t[0]>=1&&t[0]<=textureMax&&t[0]==math.Trunc(t[0])&&t[1]>=0&&t[1]<=8&&t[1]==math.Trunc(t[1])&&t[2]>0&&t[2]<=4096&&t[3]>0&&t[3]<=4096&&math.Abs(t[4])<=4096&&math.Abs(t[5])<=4096&&t[6]>=0&&t[6]<=1&&(t[7]==0||t[7]==1)
 }
 func decodeTexture(data []byte)([]uint32,error){return decodeTextureBudget(data,texturePixelBudget,0)}
 func decodeTextureBudget(data []byte,used,slots int)([]uint32,error){

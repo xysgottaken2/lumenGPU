@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.10.0)')
+print('[LumenGPU] Client starting (0.10.1)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -322,6 +322,7 @@ local function modernMaterials()
     local ok,value=pcall(function() return materialService.Use2022Materials end)
     return not ok or value
 end
+local materialSourceLog={}
 local function builtinTexture(mat)
     if workspace:GetAttribute('LumenBuiltinMaterials')==false then return nil end
     local name=mat.Name;local ids=builtinMaps[name];if not ids then return nil end
@@ -333,7 +334,7 @@ local function builtinTexture(mat)
     local official=false
     -- Classic previews are preferred for classic places. Modern maps are
     -- requested first in modern places; fallback only after confirmed failure.
-    if modern or not previewMaterials[name] then
+    if modern or workspace:GetAttribute('LumenPreferOfficialMaterials')==true or not previewMaterials[name] then
         color=discoverImage(ids[1],true);official=color>0
         if color==0 and failedImages[ids[1]] and previewMaterials[name] then
             color=discoverImage(localID,true)
@@ -347,6 +348,10 @@ local function builtinTexture(mat)
         end
     end
     if color==0 then return nil end
+    local source=official and ('official '..ids[1]) or (resolvedImages[localID]==color and localID or altID)
+    if materialSourceLog[name]~=source then
+        materialSourceLog[name]=source;print('[LumenGPU Material] '..name..' -> '..source)
+    end
     if official then
         n=discoverImage(ids[2],true);r=discoverImage(ids[3],true)
         if ids[4] then m=discoverImage(ids[4],true) end
@@ -570,11 +575,11 @@ local function orientWedge(obj,c,size,shape)
     return c*CFrame.Angles(0,rotation,0),size
 end
 local surfaceNames={'RightSurface','LeftSurface','TopSurface','BottomSurface','BackSurface','FrontSurface'}
-local surfaceKinds={[Enum.SurfaceType.Studs]=1,[Enum.SurfaceType.Inlet]=2,[Enum.SurfaceType.Universal]=3}
+local surfaceKinds={[Enum.SurfaceType.Studs]=1,[Enum.SurfaceType.Inlet]=2,[Enum.SurfaceType.Universal]=3,[Enum.SurfaceType.Weld]=4,[Enum.SurfaceType.Glue]=4}
 local function extraMaterial(obj,tex)
     local packed=0
     if obj:IsA('Part') or obj:IsA('SpawnLocation') then
-        for i,k in surfaceNames do packed+=(surfaceKinds[obj[k]] or 0)*4^(i-1) end
+        for i,k in surfaceNames do packed+=(surfaceKinds[obj[k]] or 0)*8^(i-1) end
     end
     local hum=obj.Parent and obj.Parent:FindFirstChildOfClass('Humanoid')
     if hum and hum.RigType==Enum.HumanoidRigType.R6 then
@@ -649,6 +654,12 @@ local function materialPart(obj)
             tex=bt;ex=table.clone(ex);ex[2]=n;ex[3]=r;ex[4]=m;ex[5]=num('LumenPBRStrength',.35,0,1)
             ex[8]=(obj:GetAttribute('PathSpecular')~=nil or obj:GetAttribute('PathMetallic')~=nil) and -1 or confidence
         end
+    end
+    -- Real surface maps override legacy surface decorations; the original
+    -- DDS is a separate texture mode, not an albedo texture.
+    if not tex and ex[1]>0 then
+        local studs=discoverImage('local-studs.dds')
+        if studs>0 then tex={studs,8,1,1,0,0,1,1};ex=table.clone(ex);ex[5]=0 end
     end
     local e,special=meshEntry(obj)
     if e and e.state=='ready' then
@@ -1679,4 +1690,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.10.0 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.10.1 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')

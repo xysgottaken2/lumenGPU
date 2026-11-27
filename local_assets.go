@@ -23,6 +23,7 @@ func localCandidates(root,appdata,kind,asset string)[]string{
   }else{
    paths=append(paths,filepath.Join(base,"textures",name),filepath.Join(base,"textures","particles",name),filepath.Join(base,"particles",name))
    if strings.HasPrefix(name,"mtrl_"){paths=append(paths,filepath.Join(base,"textures","TerrainTools",name),filepath.Join(base,"studio","textures","TerrainTools",name),filepath.Join(base,"TerrainTools",name))}
+   if name=="studs.dds"{paths=append(paths,filepath.Join(versions,d.Name(),"PlatformContent","pc","textures",name),filepath.Join(base,"textures","ui",name))}
   }
  }
  return paths
