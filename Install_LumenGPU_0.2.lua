@@ -15,7 +15,7 @@ make(rp,'RemoteEvent','LumenGPU_Camera')
 make(sp,'LocalScript','LumenGPU_Client',[====[
 local RunService=game:GetService('RunService')
 if not RunService:IsStudio() then return end
-print('[LumenGPU] Client starting (0.9.6a)')
+print('[LumenGPU] Client starting (0.9.7)')
 local remote=game:GetService('ReplicatedStorage'):WaitForChild('LumenGPU_Camera',10)
 assert(remote,'LumenGPU_Camera missing: reinstall in Edit mode')
 local UIS=game:GetService('UserInputService')
@@ -1346,4 +1346,4 @@ while task.wait(1/60) do
  end
 end
 ]====])
-print('LUMEN GPU 0.9.6a Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')
+print('LUMEN GPU 0.9.7 Lumenus asset discovery installed. Enable HTTP Requests, start LumenBridge.exe and the native renderer, Play locally (streaming starts automatically; P toggles). Existing LUMEN installations are not removed; stop their renderer.')

@@ -16,6 +16,7 @@ import (
  "os/exec"
  "runtime"
  "strings"
+ "sync"
  "time"
 )
 
@@ -29,7 +30,7 @@ type oauthToken struct {
  Expires int `json:"expires_in"`
  Scope string `json:"scope"`
 }
-type oauthSession struct { clientID string; token oauthToken; expiry time.Time }
+type oauthSession struct { mu sync.Mutex; clientID string; token oauthToken; expiry time.Time; rememberPath string }
 func oauthRandom()(string,error){b:=make([]byte,32);if _,e:=rand.Read(b);e!=nil{return "",e};return base64.RawURLEncoding.EncodeToString(b),nil}
 func oauthChallenge(v string)string{h:=sha256.Sum256([]byte(v));return base64.RawURLEncoding.EncodeToString(h[:])}
 func oauthURL(id,state,verifier string)string{
@@ -47,16 +48,25 @@ func oauthExchange(ctx context.Context, form url.Values)(oauthToken,error){
  req.Header.Set("Content-Type","application/x-www-form-urlencoded")
  c:=&http.Client{Timeout:15*time.Second,CheckRedirect:func(*http.Request,[]*http.Request)error{return http.ErrUseLastResponse}}
  res,e:=c.Do(req);if e!=nil{return t,fmt.Errorf("token service unavailable")};defer res.Body.Close()
- if res.StatusCode!=200{return t,fmt.Errorf("token exchange HTTP %d; check app settings and consent",res.StatusCode)}
+ if res.StatusCode!=200{
+  var failure struct{Error string}
+  if json.NewDecoder(io.LimitReader(res.Body,64<<10)).Decode(&failure)==nil&&failure.Error=="invalid_grant"{return t,errOAuthGrant}
+  return t,fmt.Errorf("token exchange HTTP %d; check app settings and consent",res.StatusCode)
+ }
  if json.NewDecoder(io.LimitReader(res.Body,64<<10)).Decode(&t)!=nil||t.Access==""||!strings.EqualFold(t.Type,"Bearer")||t.Expires<=0{return oauthToken{},fmt.Errorf("invalid token response")}
  if t.Scope!=""&&!strings.Contains(" "+t.Scope+" "," "+oauthScope+" "){return oauthToken{},fmt.Errorf("asset delivery permission not granted")}
  return t,nil
 }
 func(s *oauthSession)bearer(ctx context.Context)(string,error){
- if time.Until(s.expiry)>30*time.Second{return s.token.Access,nil}
+ s.mu.Lock();defer s.mu.Unlock()
+ if s.token.Access!=""&&time.Until(s.expiry)>30*time.Second{return s.token.Access,nil}
  if s.token.Refresh==""{return "",fmt.Errorf("authorization expired; reconnect")}
  t,e:=oauthExchange(ctx,url.Values{"client_id":{s.clientID},"grant_type":{"refresh_token"},"refresh_token":{s.token.Refresh}})
- if e!=nil{return "",e};s.token=t;s.expiry=time.Now().Add(time.Duration(t.Expires)*time.Second);return t.Access,nil
+ if e!=nil{return "",e}
+ if t.Refresh==""{t.Refresh=s.token.Refresh}
+ s.token=t;s.expiry=time.Now().Add(time.Duration(t.Expires)*time.Second)
+ if s.rememberPath!=""{if e:=saveOAuth(s.rememberPath,s.clientID,t.Refresh);e!=nil{fmt.Println("[Lumenus] Could not update encrypted authorization; this session will continue.")}}
+ return t.Access,nil
 }
 func openOAuthBrowser(link string){
  if runtime.GOOS=="windows" {if e:=exec.Command("rundll32.exe","url.dll,FileProtocolHandler",link).Start();e==nil{return}}
@@ -92,6 +102,29 @@ func connectOAuth(ctx context.Context,id string)(*oauthSession,error){
 }
 func configureOAuth(ctx context.Context)(*oauthSession,error){
  id:=strings.TrimSpace(os.Getenv("LUMEN_OAUTH_CLIENT_ID"))
+ path,pathErr:=oauthStorePath()
+ if pathErr==nil {
+  saved,e:=loadOAuth(path)
+  if e==nil&&(id==""||id==saved.ClientID){
+   s:=&oauthSession{clientID:saved.ClientID,token:oauthToken{Refresh:saved.Refresh},rememberPath:path}
+   fmt.Println("[Lumenus] Restoring remembered Roblox authorization...")
+   if _,e=s.bearer(ctx);e==nil{fmt.Println("[Lumenus] Remembered authorization restored.");return s,nil}
+   if e!=errOAuthGrant{return nil,fmt.Errorf("saved authorization could not be refreshed; retry later or run Forget-Roblox.bat to reconnect: %w",e)}
+   fmt.Println("[Lumenus] Saved authorization expired or revoked. New consent required.")
+   id=saved.ClientID
+   if e=forgetOAuth(path);e!=nil{return nil,fmt.Errorf("could not clear expired authorization")}
+  }else if e!=nil&&!os.IsNotExist(e){
+   fmt.Println("[Lumenus] Saved authorization unreadable. Run Forget-Roblox.bat to clear it, or authorize again.")
+  }
+ }
  if id==""{fmt.Print("[Lumenus] Enter your registered public OAuth application Client ID (not secret): ");if _,e:=fmt.Scanln(&id);e!=nil{return nil,fmt.Errorf("client ID not provided")}}
- return connectOAuth(ctx,id)
+ s,e:=connectOAuth(ctx,id);if e!=nil{return nil,e}
+ if pathErr==nil&&s.token.Refresh!=""{
+  fmt.Print("[Lumenus] Remember authorization on this Windows account? [y/N]: ")
+  var answer string;fmt.Scanln(&answer)
+  if strings.EqualFold(answer,"y")||strings.EqualFold(answer,"yes"){
+   if e:=saveOAuth(path,id,s.token.Refresh);e!=nil{fmt.Println("[Lumenus] Encrypted storage unavailable; authorization remains session-only.")}else{s.rememberPath=path;fmt.Println("[Lumenus] Encrypted authorization saved.")}
+  }
+ }
+ return s,nil
 }
